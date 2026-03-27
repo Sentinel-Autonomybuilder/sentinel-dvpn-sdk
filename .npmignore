@@ -1,0 +1,9 @@
+.git/
+.github/
+test/
+tests/
+*.test.js
+*.spec.js
+.env
+*.env
+*.enc.json

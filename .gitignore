@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.env
+bin/v2ray*
+bin/geoip.dat
+bin/geosite.dat
+*.enc.json
+.DS_Store
+Thumbs.db

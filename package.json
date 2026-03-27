@@ -1,0 +1,56 @@
+{
+  "name": "sentinel-dvpn-sdk",
+  "version": "1.0.0",
+  "description": "Decentralized VPN SDK for the Sentinel P2P bandwidth network. WireGuard + V2Ray tunnels, Cosmos blockchain, 900+ nodes across 90+ countries.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "*.js",
+    "chain/",
+    "wallet/",
+    "protocol/",
+    "security/",
+    "pricing/",
+    "state/",
+    "cli/",
+    "bin/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node -e \"import('./index.js').then(m => console.log('OK:', Object.keys(m).length, 'exports'))\"",
+    "postinstall": "node bin/setup.js || true"
+  },
+  "keywords": [
+    "vpn", "dvpn", "sentinel", "decentralized", "wireguard", "v2ray",
+    "p2p", "privacy", "cosmos", "blockchain", "socks5", "tunnel",
+    "bandwidth", "peer-to-peer", "censorship-resistant"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sentinel-Autonomybuilder/sentinel-dvpn-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Sentinel-Autonomybuilder/sentinel-dvpn-sdk/issues"
+  },
+  "homepage": "https://github.com/Sentinel-Autonomybuilder/sentinel-dvpn-sdk#readme",
+  "dependencies": {
+    "@cosmjs/stargate": "0.32.2",
+    "@cosmjs/amino": "0.32.2",
+    "@cosmjs/crypto": "0.32.2",
+    "@cosmjs/encoding": "0.32.2",
+    "@cosmjs/proto-signing": "0.32.2",
+    "@noble/curves": "^1.4.0",
+    "axios": "^1.7.0",
+    "socks-proxy-agent": "^8.0.0",
+    "dotenv": "^16.4.0"
+  }
+}
