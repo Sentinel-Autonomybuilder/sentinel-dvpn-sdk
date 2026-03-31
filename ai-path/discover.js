@@ -102,7 +102,11 @@ export async function discoverNodes(opts = {}) {
     return {
       address: n.address || n.acc_address,
       country: n.country || n.location?.country || null,
-      protocol: (n.service_type === 2 || n.serviceType === 2) ? 'wireguard' : 'v2ray',
+      protocol: n.service_type === 2 || n.serviceType === 2 ? 'wireguard'
+        : n.service_type === 1 || n.serviceType === 1 ? 'v2ray'
+        : n.service_type === 'wireguard' ? 'wireguard'
+        : n.service_type === 'v2ray' ? 'v2ray'
+        : null,
       pricePerGb,
       pricePerHour,
       score: n.qualityScore ?? n.score ?? 0,
