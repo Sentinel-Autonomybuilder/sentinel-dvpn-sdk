@@ -4,8 +4,13 @@
   "description": "Decentralized VPN SDK for the Sentinel P2P bandwidth network. WireGuard + V2Ray tunnels, Cosmos blockchain, 900+ nodes across 90+ countries.",
   "type": "module",
   "main": "index.js",
+  "bin": {
+    "sentinel": "./cli/index.js",
+    "sentinel-ai": "./ai-path/cli.js"
+  },
   "exports": {
-    ".": "./index.js"
+    ".": "./index.js",
+    "./ai-path": "./ai-path/index.js"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -20,6 +25,9 @@
     "state/",
     "cli/",
     "bin/",
+    "config/",
+    "errors/",
+    "ai-path/",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
