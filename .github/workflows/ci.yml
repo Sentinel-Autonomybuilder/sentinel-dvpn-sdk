@@ -109,6 +109,8 @@ jobs:
           let errors = 0;
 
           for (const entry of (pkg.files || [])) {
+            // Skip glob patterns (*.js, **/*.ts) — npm handles these, not filesystem checks
+            if (entry.includes('*')) continue;
             const clean = entry.replace(/\/$/, '');
             if (!fs.existsSync(clean)) {
               console.error(`MISSING: package.json "files" references "${entry}" but it does not exist`);
