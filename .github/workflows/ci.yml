@@ -1,0 +1,204 @@
+name: SDK Integrity Check
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  validate:
+    name: Validate SDK
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Verify all imports resolve
+        run: |
+          node --input-type=module <<'SCRIPT'
+          import fs from 'fs';
+          import path from 'path';
+          import { fileURLToPath } from 'url';
+
+          const __dirname = path.dirname(fileURLToPath(import.meta.url));
+          const root = process.cwd();
+          let errors = 0;
+          let checked = 0;
+
+          function walk(dir) {
+            const files = [];
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.name === 'node_modules' || entry.name === '.git') continue;
+              if (entry.isDirectory()) files.push(...walk(full));
+              else if (full.endsWith('.js') || full.endsWith('.mjs')) files.push(full);
+            }
+            return files;
+          }
+
+          for (const file of walk(root)) {
+            const content = fs.readFileSync(file, 'utf8');
+            const lines = content.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+              const line = lines[i];
+              // Skip comments (JSDoc examples)
+              if (line.trimStart().startsWith('*') || line.trimStart().startsWith('//')) continue;
+
+              const match = line.match(/from\s+['"](\.\.[^'"]+|\.\/[^'"]+)['"]/);
+              if (!match) continue;
+              checked++;
+
+              const importPath = match[1];
+              const resolved = path.resolve(path.dirname(file), importPath);
+              if (!fs.existsSync(resolved)) {
+                const rel = path.relative(root, file);
+                console.error(`MISSING IMPORT: ${rel} -> ${importPath}`);
+                console.error(`  Expected at: ${path.relative(root, resolved)}`);
+                errors++;
+              }
+            }
+          }
+
+          console.log(`\nChecked ${checked} relative imports across ${walk(root).length} files`);
+          if (errors > 0) {
+            console.error(`\n${errors} MISSING IMPORT(S) FOUND — commit is broken`);
+            process.exit(1);
+          } else {
+            console.log('All relative imports resolve correctly');
+          }
+          SCRIPT
+
+      - name: Verify index.js loads all exports
+        run: |
+          node --input-type=module <<'SCRIPT'
+          try {
+            const m = await import('./index.js');
+            const count = Object.keys(m).length;
+            console.log(`index.js loaded successfully: ${count} exports`);
+            if (count < 100) {
+              console.error(`Expected 100+ exports, got ${count} — modules may be missing`);
+              process.exit(1);
+            }
+          } catch (e) {
+            console.error('FAILED to load index.js:', e.message);
+            if (e.code === 'ERR_MODULE_NOT_FOUND') {
+              console.error('Missing module:', e.url || e.message);
+            }
+            process.exit(1);
+          }
+          SCRIPT
+
+      - name: Verify package.json files exist
+        run: |
+          node --input-type=module <<'SCRIPT'
+          import fs from 'fs';
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          let errors = 0;
+
+          for (const entry of (pkg.files || [])) {
+            const clean = entry.replace(/\/$/, '');
+            if (!fs.existsSync(clean)) {
+              console.error(`MISSING: package.json "files" references "${entry}" but it does not exist`);
+              errors++;
+            }
+          }
+
+          // Verify main and exports
+          if (pkg.main && !fs.existsSync(pkg.main)) {
+            console.error(`MISSING: package.json "main" points to "${pkg.main}" but it does not exist`);
+            errors++;
+          }
+
+          if (pkg.exports) {
+            for (const [key, val] of Object.entries(pkg.exports)) {
+              const target = typeof val === 'string' ? val : val.default || val.import;
+              if (target && !fs.existsSync(target)) {
+                console.error(`MISSING: package.json exports["${key}"] points to "${target}" but it does not exist`);
+                errors++;
+              }
+            }
+          }
+
+          if (errors > 0) {
+            console.error(`\n${errors} package.json reference(s) broken`);
+            process.exit(1);
+          } else {
+            console.log(`All package.json file references valid (${(pkg.files || []).length} entries)`);
+          }
+          SCRIPT
+
+      - name: Verify submodule imports resolve
+        run: |
+          node --input-type=module <<'SCRIPT'
+          const modules = [
+            './chain/index.js',
+            './wallet/index.js',
+            './protocol/index.js',
+            './security/index.js',
+            './pricing/index.js',
+            './state/index.js',
+            './config/index.js',
+            './errors/index.js',
+            './cli/index.js',
+          ];
+
+          let passed = 0;
+          let failed = 0;
+
+          for (const mod of modules) {
+            try {
+              await import(mod);
+              console.log(`  OK: ${mod}`);
+              passed++;
+            } catch (e) {
+              console.error(`FAIL: ${mod} — ${e.message}`);
+              failed++;
+            }
+          }
+
+          console.log(`\nSubmodules: ${passed} passed, ${failed} failed`);
+          if (failed > 0) process.exit(1);
+          SCRIPT
+
+      - name: Verify no secrets in source
+        run: |
+          echo "Checking for hardcoded secrets..."
+          FOUND=0
+
+          # Check for hardcoded wallet addresses
+          if grep -rn 'sent1[a-z0-9]\{38\}' --include='*.js' --exclude-dir=node_modules .; then
+            echo "ERROR: Hardcoded wallet address found"
+            FOUND=1
+          fi
+
+          # Check for mnemonics
+          if grep -rn 'MNEMONIC=' --include='*.js' --exclude-dir=node_modules .; then
+            echo "ERROR: Mnemonic reference found in source"
+            FOUND=1
+          fi
+
+          # Check for local paths
+          if grep -rn 'C:\\Users' --include='*.js' --exclude-dir=node_modules .; then
+            echo "ERROR: Local file path found"
+            FOUND=1
+          fi
+
+          if [ $FOUND -eq 1 ]; then
+            echo "Secrets check FAILED"
+            exit 1
+          else
+            echo "No secrets found in source"
+          fi
