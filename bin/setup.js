@@ -21,7 +21,7 @@ import http from 'http';
 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BIN_DIR = path.join(__dirname, 'bin');
+const BIN_DIR = __dirname;
 
 import { V2RAY_VERSION } from '../defaults.js';
 const V2RAY_URLS = {
