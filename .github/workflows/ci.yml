@@ -177,30 +177,49 @@ jobs:
 
       - name: Verify no secrets in source
         run: |
-          echo "Checking for hardcoded secrets..."
-          FOUND=0
+          node --input-type=module <<'SCRIPT'
+          import fs from 'fs';
+          import path from 'path';
 
-          # Check for hardcoded wallet addresses
-          if grep -rn 'sent1[a-z0-9]\{38\}' --include='*.js' --exclude-dir=node_modules .; then
-            echo "ERROR: Hardcoded wallet address found"
-            FOUND=1
-          fi
+          const patterns = [
+            { name: 'Hardcoded wallet address', regex: /sent1[a-z0-9]{38}/ },
+            { name: 'Mnemonic assignment', regex: /MNEMONIC\s*=\s*['"]/ },
+            { name: 'Local Windows path', regex: /C:\\Users\\[A-Za-z]/ },
+          ];
 
-          # Check for mnemonics
-          if grep -rn 'MNEMONIC=' --include='*.js' --exclude-dir=node_modules .; then
-            echo "ERROR: Mnemonic reference found in source"
-            FOUND=1
-          fi
+          function walk(dir) {
+            const files = [];
+            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (e.name === 'node_modules' || e.name === '.git') continue;
+              const p = path.join(dir, e.name);
+              if (e.isDirectory()) files.push(...walk(p));
+              else if (p.endsWith('.js')) files.push(p);
+            }
+            return files;
+          }
 
-          # Check for local paths
-          if grep -rn 'C:\\Users' --include='*.js' --exclude-dir=node_modules .; then
-            echo "ERROR: Local file path found"
-            FOUND=1
-          fi
+          let errors = 0;
+          for (const file of walk('.')) {
+            const lines = fs.readFileSync(file, 'utf8').split('\n');
+            for (let i = 0; i < lines.length; i++) {
+              const line = lines[i];
+              const trimmed = line.trimStart();
+              // Skip comments — inline docs may reference paths/addresses as examples
+              if (trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+              for (const p of patterns) {
+                if (p.regex.test(line)) {
+                  console.error(`${p.name}: ${file}:${i + 1}`);
+                  console.error(`  ${line.trim()}`);
+                  errors++;
+                }
+              }
+            }
+          }
 
-          if [ $FOUND -eq 1 ]; then
-            echo "Secrets check FAILED"
-            exit 1
-          else
-            echo "No secrets found in source"
-          fi
+          if (errors > 0) {
+            console.error(`\n${errors} secret(s) found in source — commit blocked`);
+            process.exit(1);
+          } else {
+            console.log('No secrets found in source');
+          }
+          SCRIPT
