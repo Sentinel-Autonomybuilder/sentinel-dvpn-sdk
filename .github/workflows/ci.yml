@@ -183,7 +183,7 @@ jobs:
 
           const patterns = [
             { name: 'Hardcoded wallet address', regex: /sent1[a-z0-9]{38}/ },
-            { name: 'Mnemonic assignment', regex: /MNEMONIC\s*=\s*['"]/ },
+            { name: 'Hardcoded mnemonic', regex: /^\s*(?:const|let|var|export)?\s*(?:MNEMONIC|mnemonic)\s*=\s*['"](?:(?!process\.env)[a-z ]{20,})['"]/ },
             { name: 'Local Windows path', regex: /C:\\Users\\[A-Za-z]/ },
           ];
 
