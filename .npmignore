@@ -7,3 +7,15 @@ tests/
 .env
 *.env
 *.enc.json
+
+# V2Ray binaries — downloaded at install via postinstall
+bin/v2ray*
+bin/geoip*
+bin/geosite*
+bin/config.json
+bin/vpoint*
+bin/bin/
+
+# AI path test/dev files
+ai-path/test-*
+ai-path/project-findings/
