@@ -23,7 +23,7 @@ import http from 'http';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN_DIR = path.join(__dirname, 'bin');
 
-import { V2RAY_VERSION } from './defaults.js';
+import { V2RAY_VERSION } from '../defaults.js';
 const V2RAY_URLS = {
   'win32-x64':  `https://github.com/v2fly/v2ray-core/releases/download/v${V2RAY_VERSION}/v2ray-windows-64.zip`,
   'win32-ia32': `https://github.com/v2fly/v2ray-core/releases/download/v${V2RAY_VERSION}/v2ray-windows-32.zip`,
