@@ -1224,7 +1224,10 @@ export async function connectAuto(opts) {
     const node = candidates[i];
     logFn(`[connectAuto] Trying ${node.address} (${i + 1}/${Math.min(candidates.length, maxAttempts)})...`);
     try {
-      return await connectDirect({ ...opts, nodeAddress: node.address, _skipLock: true });
+      // Pass _cachedWallet from first attempt to skip wallet+RPC re-creation on retries
+      const retryOpts = { ...opts, nodeAddress: node.address, _skipLock: true };
+      if (i > 0 && opts._cachedWallet) retryOpts._cachedWallet = opts._cachedWallet;
+      return await connectDirect(retryOpts);
     } catch (err) {
       recordNodeFailure(node.address);
       // Track spend: if error is AFTER payment (tunnel failure), count the cost
