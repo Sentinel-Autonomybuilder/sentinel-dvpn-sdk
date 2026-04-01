@@ -1461,10 +1461,13 @@ async function connectInternal(opts, paymentStrategy, retryStrategy, state = _de
   try {
     const bal = await getBalance(client, account.address);
     progress(onProgress, logFn, 'wallet', `${account.address} | ${bal.dvpn.toFixed(1)} P2P`);
-    if (!opts.dryRun && bal.udvpn < 100000) {
+    // Check balance against actual node price + gas (not just 0.1 P2P)
+    const nodePriceUdvpn = (nodeInfo.gigabyte_prices || []).find(p => p.denom === 'udvpn');
+    const minRequired = nodePriceUdvpn ? parseInt(nodePriceUdvpn.quote_value || '0', 10) + 500000 : 1000000; // price + 0.5 P2P gas
+    if (!opts.dryRun && bal.udvpn < minRequired) {
       throw new ChainError(ErrorCodes.INSUFFICIENT_BALANCE,
-        `Wallet has ${bal.dvpn.toFixed(2)} P2P — need at least 0.1 P2P for a session. Fund address ${account.address} with P2P tokens.`,
-        { balance: bal, address: account.address }
+        `Wallet has ${bal.dvpn.toFixed(2)} P2P — need at least ${(minRequired / 1e6).toFixed(2)} P2P (node price + gas) for a session. Fund address ${account.address} with P2P tokens.`,
+        { balance: bal, address: account.address, required: minRequired }
       );
     }
   } catch (balErr) {

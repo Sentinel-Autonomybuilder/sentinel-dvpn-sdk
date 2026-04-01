@@ -108,8 +108,21 @@ async function checkVpnIp(socksPort) {
       const { resolve, dirname } = await import('path');
       const { fileURLToPath, pathToFileURL } = await import('url');
       const __dir = dirname(fileURLToPath(import.meta.url));
-      const axiosPath = resolve(__dir, '..', 'node_modules', 'axios', 'index.js');
-      const socksPath = resolve(__dir, '..', 'node_modules', 'socks-proxy-agent', 'dist', 'index.js');
+      // Try multiple paths: sibling packages (standard), project root (hoisted)
+      const candidates = [
+        resolve(__dir, '..', 'axios', 'index.js'),
+        resolve(__dir, '..', '..', 'node_modules', 'axios', 'index.js'),
+        resolve(__dir, 'node_modules', 'axios', 'index.js'),
+      ];
+      const socksCandidates = [
+        resolve(__dir, '..', 'socks-proxy-agent', 'dist', 'index.js'),
+        resolve(__dir, '..', '..', 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
+        resolve(__dir, 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
+      ];
+      const { existsSync } = await import('fs');
+      const axiosPath = candidates.find(p => existsSync(p));
+      const socksPath = socksCandidates.find(p => existsSync(p));
+      if (!axiosPath || !socksPath) throw new Error('Cannot find axios or socks-proxy-agent');
       const axios = (await import(pathToFileURL(axiosPath).href)).default;
       const { SocksProxyAgent } = await import(pathToFileURL(socksPath).href);
       const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
