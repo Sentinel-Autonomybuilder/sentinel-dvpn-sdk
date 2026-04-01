@@ -7,3 +7,4 @@ bin/geosite.dat
 *.enc.json
 .DS_Store
 Thumbs.db
+package-lock.json

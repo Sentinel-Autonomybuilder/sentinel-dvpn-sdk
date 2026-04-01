@@ -1,0 +1,14 @@
+# Force LF line endings for all text files
+* text=auto eol=lf
+
+# Explicitly mark JS files as LF (shebangs break with CRLF)
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+
+# Binary files
+*.exe binary
+*.dat binary
+*.zip binary
