@@ -108,13 +108,15 @@ async function checkVpnIp(socksPort) {
       const { resolve, dirname } = await import('path');
       const { fileURLToPath, pathToFileURL } = await import('url');
       const __dir = dirname(fileURLToPath(import.meta.url));
-      // Try multiple paths: sibling packages (standard), project root (hoisted)
+      // Try multiple paths: parent node_modules (SDK repo), sibling (npm), hoisted (project root)
       const candidates = [
+        resolve(__dir, '..', 'node_modules', 'axios', 'index.js'),
         resolve(__dir, '..', 'axios', 'index.js'),
         resolve(__dir, '..', '..', 'node_modules', 'axios', 'index.js'),
         resolve(__dir, 'node_modules', 'axios', 'index.js'),
       ];
       const socksCandidates = [
+        resolve(__dir, '..', 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
         resolve(__dir, '..', 'socks-proxy-agent', 'dist', 'index.js'),
         resolve(__dir, '..', '..', 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
         resolve(__dir, 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
