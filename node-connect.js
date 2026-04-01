@@ -1517,32 +1517,9 @@ async function connectInternal(opts, paymentStrategy, retryStrategy, state = _de
   progress(onProgress, logFn, 'validate', 'Checking tunnel requirements...');
   const resolvedV2rayPath = validateTunnelRequirements(status.type, opts.v2rayExePath);
 
-  // 2c. PRE-VERIFY: For WireGuard, test that the node's WG port is reachable BEFORE paying.
-  // This prevents the #1 token waste: paying for a session then discovering the tunnel is dead.
-  if (status.type === 'wireguard' && !opts.skipPreVerify) {
-    progress(onProgress, logFn, 'pre-verify', 'Testing WireGuard port reachability...');
-    const nodeUrl = new URL(nodeInfo.remote_url);
-    const nodeHost = nodeUrl.hostname;
-    try {
-      const net = await import('net');
-      const reachable = await new Promise((resolve) => {
-        const sock = net.createConnection({ host: nodeHost, port: 443, timeout: 5000 });
-        sock.on('connect', () => { sock.destroy(); resolve(true); });
-        sock.on('error', () => resolve(false));
-        sock.on('timeout', () => { sock.destroy(); resolve(false); });
-      });
-      if (!reachable) {
-        throw new NodeError(ErrorCodes.NODE_OFFLINE,
-          `WireGuard node ${opts.nodeAddress} is unreachable at ${nodeHost}. Skipping before payment.`,
-          { nodeAddress: opts.nodeAddress, host: nodeHost });
-      }
-      progress(onProgress, logFn, 'pre-verify', 'Node reachable ✓');
-    } catch (e) {
-      if (e.code === ErrorCodes.NODE_OFFLINE) throw e;
-      // Non-fatal: pre-verify failed but don't block — proceed to payment
-      progress(onProgress, logFn, 'pre-verify', `Pre-verify inconclusive: ${e.message}`);
-    }
-  }
+  // Note: node reachability is already proven by nodeStatusV3() above (line ~1502).
+  // If the status probe succeeded, the node's HTTPS endpoint is live.
+  // WG tunnel failures are transport-level (UDP), not reachability — TCP pre-checks can't predict them.
 
   // ── DRY-RUN: return mock result without paying, handshaking, or tunneling ──
   if (opts.dryRun) {
