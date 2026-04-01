@@ -23,8 +23,8 @@ import {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /** Minimum balance (in udvpn) to consider a wallet "funded" for VPN sessions.
- *  1 P2P covers gas (~0.04 P2P) + cheapest node (~0.68 P2P/GB) with margin. */
-const FUNDED_THRESHOLD = 1000000; // 1.0 P2P
+ *  Matches connect.js MIN_BALANCE_UDVPN — cheapest node (~4 P2P) + gas. */
+const FUNDED_THRESHOLD = 5_000_000; // 5.0 P2P
 
 // ─── createWallet() ──────────────────────────────────────────────────────────
 
