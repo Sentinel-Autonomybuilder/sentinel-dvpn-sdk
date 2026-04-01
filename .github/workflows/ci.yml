@@ -101,6 +101,34 @@ jobs:
           }
           SCRIPT
 
+      - name: Verify critical function signatures
+        run: |
+          node --input-type=module <<'SCRIPT'
+          const sdk = await import('./index.js');
+          const ai = await import('./ai-path/index.js');
+          const critical = {
+            // SDK core functions must be functions
+            connect: sdk.connectDirect, disconnect: sdk.disconnect,
+            connectAuto: sdk.connectAuto, listNodes: sdk.queryOnlineNodes,
+            createWallet: sdk.createWallet, getBalance: sdk.getBalance,
+            broadcast: sdk.broadcast, preflight: sdk.preflight,
+            // AI Path functions
+            aiConnect: ai.connect, aiDisconnect: ai.disconnect,
+            aiStatus: ai.status, aiCreateWallet: ai.createWallet,
+            aiGetBalance: ai.getBalance, aiDiscover: ai.discoverNodes,
+            aiRecommend: ai.recommend, aiSetup: ai.setup,
+          };
+          let failed = 0;
+          for (const [name, fn] of Object.entries(critical)) {
+            if (typeof fn !== 'function') {
+              console.error(`MISSING FUNCTION: ${name} is ${typeof fn}`);
+              failed++;
+            }
+          }
+          if (failed > 0) { console.error(`${failed} critical functions missing`); process.exit(1); }
+          else console.log(`All ${Object.keys(critical).length} critical functions verified`);
+          SCRIPT
+
       - name: Verify package.json files exist
         run: |
           node --input-type=module <<'SCRIPT'

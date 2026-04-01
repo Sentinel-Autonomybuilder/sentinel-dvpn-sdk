@@ -41,7 +41,7 @@ import {
 
 const IP_CHECK_URL = 'https://api.ipify.org?format=json';
 const IP_CHECK_TIMEOUT = 10000;
-const MIN_BALANCE_UDVPN = 500000; // 0.5 P2P — minimum for gas + cheapest session
+const MIN_BALANCE_UDVPN = 5_000_000; // 5 P2P — realistic minimum for cheapest node (~4 P2P) + gas
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -104,29 +104,9 @@ async function checkVpnIp(socksPort) {
       if (typeof checkVpnIpViaSocks === 'function') {
         return await checkVpnIpViaSocks(socksPort, IP_CHECK_TIMEOUT);
       }
-      // Fallback: import from SDK's node_modules with absolute path
-      const { resolve, dirname } = await import('path');
-      const { fileURLToPath, pathToFileURL } = await import('url');
-      const __dir = dirname(fileURLToPath(import.meta.url));
-      // Try multiple paths: parent node_modules (SDK repo), sibling (npm), hoisted (project root)
-      const candidates = [
-        resolve(__dir, '..', 'node_modules', 'axios', 'index.js'),
-        resolve(__dir, '..', 'axios', 'index.js'),
-        resolve(__dir, '..', '..', 'node_modules', 'axios', 'index.js'),
-        resolve(__dir, 'node_modules', 'axios', 'index.js'),
-      ];
-      const socksCandidates = [
-        resolve(__dir, '..', 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
-        resolve(__dir, '..', 'socks-proxy-agent', 'dist', 'index.js'),
-        resolve(__dir, '..', '..', 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
-        resolve(__dir, 'node_modules', 'socks-proxy-agent', 'dist', 'index.js'),
-      ];
-      const { existsSync } = await import('fs');
-      const axiosPath = candidates.find(p => existsSync(p));
-      const socksPath = socksCandidates.find(p => existsSync(p));
-      if (!axiosPath || !socksPath) throw new Error('Cannot find axios or socks-proxy-agent');
-      const axios = (await import(pathToFileURL(axiosPath).href)).default;
-      const { SocksProxyAgent } = await import(pathToFileURL(socksPath).href);
+      // Fallback: use Node.js module resolution (works in every layout)
+      const axios = (await import('axios')).default;
+      const { SocksProxyAgent } = await import('socks-proxy-agent');
       const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
       const res = await axios.get(IP_CHECK_URL, {
         httpAgent: agent, httpsAgent: agent,
