@@ -4,6 +4,21 @@ The official JavaScript SDK for the [Sentinel](https://sentinel.co) decentralize
 
 **Also available:** [C# SDK](https://github.com/Sentinel-Autonomybuilder/sentinel-dvpn-sdk-csharp) | [AI Connect](https://github.com/Sentinel-Autonomybuilder/sentinel-ai-connect) (zero-config wrapper)
 
+> **For AI agents:** If you just want to connect to a VPN with one function call, use [`sentinel-ai-connect`](https://www.npmjs.com/package/sentinel-ai-connect) instead. This SDK is for developers building custom applications.
+
+---
+
+> **AI Agent Instructions**
+>
+> ```bash
+> # Install as a dependency in YOUR project — do NOT clone or publish
+> npm install sentinel-dvpn-sdk
+> ```
+>
+> **DO NOT run `npm publish`.** You are a consumer, not a maintainer.
+
+---
+
 ## Install
 
 ```bash
