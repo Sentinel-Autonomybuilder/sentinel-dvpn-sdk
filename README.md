@@ -1,6 +1,8 @@
-# sentinel-dvpn-sdk
+# Sentinel dVPN SDK — JavaScript
 
-Decentralized VPN SDK for the [Sentinel](https://sentinel.co) P2P bandwidth network. Connect to 900+ peer-to-peer nodes across 90+ countries. No API keys. No accounts. No servers to trust.
+The official JavaScript SDK for the [Sentinel](https://sentinel.co) decentralized VPN network. WireGuard + V2Ray tunnels, Cosmos blockchain, 1000+ nodes across 70+ countries. No API keys. No accounts. No servers to trust.
+
+**Also available:** [C# SDK](https://github.com/Sentinel-Autonomybuilder/sentinel-dvpn-sdk-csharp) | [AI Connect](https://github.com/Sentinel-Autonomybuilder/sentinel-ai-connect) (zero-config wrapper)
 
 ## Install
 
