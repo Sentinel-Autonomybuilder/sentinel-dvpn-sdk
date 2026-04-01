@@ -36,7 +36,7 @@ function findV2Ray() {
   // 2. Use Node.js module resolution to find the SDK, then derive bin/ path
   try {
     const sdkMain = import.meta.resolve('sentinel-dvpn-sdk');
-    const sdkDir = dirname(sdkMain.replace('file:///', '').replace('file://', ''));
+    const sdkDir = dirname(fileURLToPath(sdkMain));
     const sdkBin = resolve(sdkDir, 'bin', binary);
     if (existsSync(sdkBin)) return sdkBin;
   } catch {}

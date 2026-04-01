@@ -153,7 +153,12 @@ export async function recommend(preferences = {}) {
   // ─── Capabilities assessment ───────────────────────────────────────────
 
   const canWG = WG_AVAILABLE && IS_ADMIN;
-  const canV2 = true; // V2Ray always available if binary exists
+  // Check actual V2Ray availability instead of assuming true
+  let canV2 = false;
+  try {
+    const { getEnvironment } = await import('./environment.js');
+    canV2 = getEnvironment().v2ray?.available ?? false;
+  } catch { canV2 = true; /* fallback: assume available if detection fails */ }
   const capabilities = { wireguard: canWG, v2ray: canV2, admin: IS_ADMIN };
 
   if (protocol === 'wireguard' && !canWG) {
@@ -205,13 +210,13 @@ export async function recommend(preferences = {}) {
 
   if (hasServiceType) {
     if (effectiveProtocol === 'wireguard') {
-      candidates = candidates.filter(n => (n.service_type || n.serviceType) === 2);
+      candidates = candidates.filter(n => String(n.serviceType || n.service_type || '').toLowerCase() === 'wireguard');
       reasoning.push(`Filtered to ${candidates.length} WireGuard nodes`);
     } else if (effectiveProtocol === 'v2ray') {
-      candidates = candidates.filter(n => (n.service_type || n.serviceType) === 1);
+      candidates = candidates.filter(n => String(n.serviceType || n.service_type || '').toLowerCase() === 'v2ray');
       reasoning.push(`Filtered to ${candidates.length} V2Ray nodes`);
     } else if (!canWG) {
-      candidates = candidates.filter(n => (n.service_type || n.serviceType) === 1);
+      candidates = candidates.filter(n => String(n.serviceType || n.service_type || '').toLowerCase() === 'v2ray');
       reasoning.push(`No admin — filtered to ${candidates.length} V2Ray nodes`);
     }
   } else {
@@ -253,7 +258,7 @@ export async function recommend(preferences = {}) {
     let score = 50; // base
 
     // Protocol bonus
-    const isWG = (node.service_type || node.serviceType) === 2;
+    const isWG = String(node.serviceType || node.service_type || '').toLowerCase() === 'wireguard';
     if (isWG) score += 15; // WireGuard more reliable
 
     // Country bonus

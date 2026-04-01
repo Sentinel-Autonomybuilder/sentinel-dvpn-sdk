@@ -75,10 +75,8 @@ export async function discoverNodes(opts = {}) {
   }
   if (opts.protocol) {
     nodes = nodes.filter(n => {
-      const type = n.service_type || n.serviceType;
-      if (opts.protocol === 'wireguard') return type === 2 || type === 'wireguard';
-      if (opts.protocol === 'v2ray') return type === 1 || type === 'v2ray';
-      return true;
+      const type = String(n.serviceType || n.service_type || '').toLowerCase();
+      return type === opts.protocol;
     });
   }
 
@@ -102,11 +100,10 @@ export async function discoverNodes(opts = {}) {
     return {
       address: n.address || n.acc_address,
       country: n.country || n.location?.country || null,
-      protocol: n.service_type === 2 || n.serviceType === 2 ? 'wireguard'
-        : n.service_type === 1 || n.serviceType === 1 ? 'v2ray'
-        : n.service_type === 'wireguard' ? 'wireguard'
-        : n.service_type === 'v2ray' ? 'v2ray'
-        : null,
+      protocol: (() => {
+        const t = String(n.serviceType || n.service_type || '').toLowerCase();
+        return t === 'wireguard' || t === 'v2ray' ? t : null;
+      })(),
       pricePerGb,
       pricePerHour,
       score: n.qualityScore ?? n.score ?? 0,
@@ -165,7 +162,7 @@ export async function getNetworkStats() {
   return {
     totalNodes: overview.totalNodes || overview.total || 0,
     byCountry: overview.byCountry || {},
-    byProtocol: overview.byProtocol || { wireguard: 0, v2ray: 0 },
+    byProtocol: overview.byType || overview.byProtocol || { wireguard: 0, v2ray: 0 },
     transportReliability: { ...TRANSPORT_SUCCESS_RATES },
   };
 }
