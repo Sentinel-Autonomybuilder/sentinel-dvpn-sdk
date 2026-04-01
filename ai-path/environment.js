@@ -217,10 +217,12 @@ export async function setup() {
   const env = getEnvironment();
   const issues = [];
 
-  // Run preflight checks (network, chain reachability, etc.)
+  // Run preflight checks — pass already-detected V2Ray path to avoid contradiction (BUG-1 fix)
   let preflightResult = null;
   try {
-    preflightResult = await preflight();
+    const preflightOpts = {};
+    if (env.v2ray?.path) preflightOpts.v2rayExePath = env.v2ray.path;
+    preflightResult = await preflight(preflightOpts);
   } catch (err) {
     issues.push(`Preflight failed: ${err.message}`);
   }

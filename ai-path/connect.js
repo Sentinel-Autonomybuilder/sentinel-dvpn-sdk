@@ -339,6 +339,19 @@ export async function connect(opts = {}) {
       const step = stageMap[stage] || 5;
       const phase = stage.toUpperCase().replace('-', '_');
       if (!silent) agentLog(step, totalSteps, phase, msg);
+      // BUG-2 fix: capture node metadata from progress callback
+      // Format: "MonkerName (protocol) - City, Country"
+      if (stage === 'node-check' && msg && !sdkOpts._discoveredNode) {
+        const match = msg.match(/^(.+?)\s+\((\w+)\)\s+-\s+(.+?),\s+(.+)$/);
+        if (match) {
+          sdkOpts._discoveredNode = {
+            moniker: match[1],
+            serviceType: match[2],
+            city: match[3],
+            country: match[4],
+          };
+        }
+      }
     },
     log: (msg) => {
       if (opts.onProgress) opts.onProgress('log', msg);
@@ -535,32 +548,22 @@ export async function connect(opts = {}) {
     timings.verify = Date.now() - t0;
     timings.total = Date.now() - connectStart;
 
-    // ── Post-connect balance check ──────────────────────────────────────
+    // ── Post-connect balance check (single RPC call — fixes BUG-3) ─────
 
     let balanceAfter = null;
+    let costUdvpn = 0;
+    let costFormatted = 'unknown';
     try {
       const postBal = await preValidateBalance(opts.mnemonic);
       balanceAfter = postBal.p2p;
-    } catch { /* non-critical */ }
+      costUdvpn = Math.max(0, balCheck.udvpn - postBal.udvpn);
+      costFormatted = formatP2P(costUdvpn);
+    } catch { /* non-critical — tunnel works even if balance check fails */ }
 
     // ── Build agent-friendly return object ───────────────────────────────
 
-    // Pull country/city/moniker from: discovered node metadata > SDK result > null
+    // Pull country/city/moniker from: discovered node metadata > SDK result > onProgress capture
     const discovered = sdkOpts._discoveredNode || {};
-
-    // Cost: compare before/after balance in udvpn for accuracy
-    let costUdvpn = 0;
-    let costFormatted = 'unknown';
-    if (balanceAfter !== null) {
-      try {
-        const postBal = await preValidateBalance(opts.mnemonic);
-        costUdvpn = Math.max(0, balCheck.udvpn - postBal.udvpn);
-        costFormatted = formatP2P(costUdvpn);
-        balanceAfter = postBal.p2p; // Refresh to accurate value
-      } catch {
-        costFormatted = 'unknown';
-      }
-    }
 
     const output = {
       sessionId: String(result.sessionId),
@@ -590,6 +593,7 @@ export async function connect(opts = {}) {
     };
 
     _lastConnectResult = output;
+    _lastConnectResult._connectedAt = Date.now(); // BUG-4 fix: store actual connect timestamp for uptime
     _connectTimings = timings;
 
     // ── Final summary ──────────────────────────────────────────────────
@@ -658,9 +662,10 @@ export async function disconnect() {
       sessionId,
       balance,
       timing: {
-        connectedMs: prevResult?.timing?.totalMs
-          ? Date.now() - (Date.now() - prevResult.timing.totalMs)
+        connectedMs: prevResult?._connectedAt
+          ? Date.now() - prevResult._connectedAt
           : null,
+        setupMs: prevResult?.timing?.totalMs || null,
       },
     };
 
@@ -742,9 +747,11 @@ export async function verify() {
     return { connected: false, ip: null, verified: false };
   }
 
-  // Check IP through tunnel — for V2Ray, must use SOCKS5 proxy (fetch ignores it)
+  // Check IP through tunnel with latency measurement
   const socksPort = _lastConnectResult?.socksPort || null;
+  const t0 = Date.now();
   const ip = await checkVpnIp(socksPort);
+  const latency = Date.now() - t0;
 
   // Try SDK's built-in verification if available
   let sdkVerified = false;
@@ -761,6 +768,9 @@ export async function verify() {
     connected: true,
     ip,
     verified: ip !== null || sdkVerified,
+    latency,
+    protocol: _lastConnectResult?.protocol || null,
+    nodeAddress: _lastConnectResult?.nodeAddress || null,
   };
 }
 
