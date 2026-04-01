@@ -24,7 +24,7 @@
     "pricing/",
     "state/",
     "cli/",
-    "bin/",
+    "bin/setup.js",
     "config/",
     "errors/",
     "ai-path/",

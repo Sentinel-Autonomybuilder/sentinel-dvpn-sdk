@@ -1198,12 +1198,28 @@ export async function connectAuto(opts) {
   }
 
   const candidates = filtered;
+  // Retry budget: limit total spend to maxSpend (default: 2x cheapest node price)
+  const cheapestPrice = Math.min(...candidates.map(n => {
+    const p = (n.gigabyte_prices || []).find(p => p.denom === 'udvpn');
+    return p ? parseInt(p.quote_value || '0', 10) : Infinity;
+  }).filter(p => p < Infinity));
+  const maxSpend = opts.maxSpend || (cheapestPrice > 0 ? cheapestPrice * 2 + 1000000 : 100_000_000);
+  let totalSpent = 0;
+
   for (let i = 0; i < Math.min(candidates.length, maxAttempts); i++) {
-    // TODO: cache wallet/RPC across retries to save time and tokens
-    // v30: Check abort flag before each retry — disconnect() sets this
+    // Check abort flag before each retry — disconnect() sets this
     if (_abortConnect) {
       _abortConnect = false;
       throw new SentinelError(ErrorCodes.ABORTED, 'Connection was cancelled by disconnect');
+    }
+    // Check retry budget — stop if we've spent too much
+    const nodePrice = (() => {
+      const p = (candidates[i].gigabyte_prices || []).find(p => p.denom === 'udvpn');
+      return p ? parseInt(p.quote_value || '0', 10) : 50_000_000;
+    })();
+    if (totalSpent > 0 && totalSpent + nodePrice > maxSpend) {
+      logFn(`[connectAuto] Retry budget exhausted (spent ${(totalSpent / 1e6).toFixed(1)} P2P, next would cost ${(nodePrice / 1e6).toFixed(1)} P2P, max ${(maxSpend / 1e6).toFixed(1)} P2P). Stopping.`);
+      break;
     }
     const node = candidates[i];
     logFn(`[connectAuto] Trying ${node.address} (${i + 1}/${Math.min(candidates.length, maxAttempts)})...`);
@@ -1211,14 +1227,18 @@ export async function connectAuto(opts) {
       return await connectDirect({ ...opts, nodeAddress: node.address, _skipLock: true });
     } catch (err) {
       recordNodeFailure(node.address);
-      errors.push({ address: node.address, error: err.message });
+      // Track spend: if error is AFTER payment (tunnel failure), count the cost
+      if (err.code !== 'INSUFFICIENT_BALANCE' && err.code !== 'NODE_OFFLINE' && err.code !== 'NODE_NOT_FOUND') {
+        totalSpent += nodePrice;
+      }
+      errors.push({ address: node.address, error: err.message, spent: nodePrice });
       logFn(`[connectAuto] ${node.address} failed: ${err.message}`);
     }
   }
 
   throw new SentinelError(ErrorCodes.ALL_NODES_FAILED,
-    `All ${errors.length} nodes failed`,
-    { attempts: errors });
+    `All ${errors.length} nodes failed (spent ~${(totalSpent / 1e6).toFixed(1)} P2P)`,
+    { attempts: errors, totalSpent });
 
   } finally { _connectLock = false; }
 }
@@ -1496,6 +1516,33 @@ async function connectInternal(opts, paymentStrategy, retryStrategy, state = _de
   // 2b. PRE-VALIDATE tunnel requirements BEFORE paying
   progress(onProgress, logFn, 'validate', 'Checking tunnel requirements...');
   const resolvedV2rayPath = validateTunnelRequirements(status.type, opts.v2rayExePath);
+
+  // 2c. PRE-VERIFY: For WireGuard, test that the node's WG port is reachable BEFORE paying.
+  // This prevents the #1 token waste: paying for a session then discovering the tunnel is dead.
+  if (status.type === 'wireguard' && !opts.skipPreVerify) {
+    progress(onProgress, logFn, 'pre-verify', 'Testing WireGuard port reachability...');
+    const nodeUrl = new URL(nodeInfo.remote_url);
+    const nodeHost = nodeUrl.hostname;
+    try {
+      const net = await import('net');
+      const reachable = await new Promise((resolve) => {
+        const sock = net.createConnection({ host: nodeHost, port: 443, timeout: 5000 });
+        sock.on('connect', () => { sock.destroy(); resolve(true); });
+        sock.on('error', () => resolve(false));
+        sock.on('timeout', () => { sock.destroy(); resolve(false); });
+      });
+      if (!reachable) {
+        throw new NodeError(ErrorCodes.NODE_OFFLINE,
+          `WireGuard node ${opts.nodeAddress} is unreachable at ${nodeHost}. Skipping before payment.`,
+          { nodeAddress: opts.nodeAddress, host: nodeHost });
+      }
+      progress(onProgress, logFn, 'pre-verify', 'Node reachable ✓');
+    } catch (e) {
+      if (e.code === ErrorCodes.NODE_OFFLINE) throw e;
+      // Non-fatal: pre-verify failed but don't block — proceed to payment
+      progress(onProgress, logFn, 'pre-verify', `Pre-verify inconclusive: ${e.message}`);
+    }
+  }
 
   // ── DRY-RUN: return mock result without paying, handshaking, or tunneling ──
   if (opts.dryRun) {
