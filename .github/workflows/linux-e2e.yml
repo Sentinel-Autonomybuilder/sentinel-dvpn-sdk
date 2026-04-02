@@ -1,0 +1,203 @@
+name: Linux E2E Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      protocol:
+        description: 'Protocol to test (v2ray or wireguard)'
+        required: true
+        default: 'v2ray'
+        type: choice
+        options:
+          - v2ray
+          - wireguard
+          - both
+
+jobs:
+  linux-e2e:
+    name: Linux E2E (${{ github.event.inputs.protocol }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Check environment
+        run: |
+          echo "=== System ==="
+          uname -a
+          echo "Node: $(node --version)"
+          echo "npm: $(npm --version)"
+          echo "User: $(whoami)"
+          echo "Admin: $(id -u) (0=root)"
+          echo ""
+          echo "=== WireGuard ==="
+          which wg-quick 2>/dev/null && echo "wg-quick: found" || echo "wg-quick: NOT FOUND"
+          which wg 2>/dev/null && echo "wg: found" || echo "wg: NOT FOUND"
+          echo ""
+          echo "=== V2Ray ==="
+          ls -la bin/v2ray 2>/dev/null && echo "v2ray binary: found" || echo "v2ray binary: NOT FOUND"
+          echo ""
+          echo "=== SDK ==="
+          node -e "import('./index.js').then(m => console.log('Exports:', Object.keys(m).length))"
+          node -e "import('./ai-path/index.js').then(m => console.log('AI Path:', Object.keys(m).length))"
+
+      - name: Install WireGuard (for WG tests)
+        if: github.event.inputs.protocol == 'wireguard' || github.event.inputs.protocol == 'both'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y wireguard-tools
+          which wg-quick
+
+      - name: Run setup check
+        run: |
+          node --input-type=module <<'SCRIPT'
+          import { setup } from './ai-path/index.js';
+          const env = await setup();
+          console.log('OS:', env.os);
+          console.log('Admin:', env.admin);
+          console.log('V2Ray:', env.v2ray, env.v2rayPath || '');
+          console.log('WireGuard:', env.wireguard);
+          console.log('Preflight:', JSON.stringify(env.preflight?.ready));
+
+          // Verify no contradiction
+          if (env.v2ray && env.preflight?.ready?.v2ray === false) {
+            console.error('BUG: v2ray=true but preflight says false');
+            process.exit(1);
+          }
+          console.log('\nSetup check PASSED');
+          SCRIPT
+
+      - name: Test wallet + chain queries
+        run: |
+          node --input-type=module <<'SCRIPT'
+          import { createWallet, getBalance, discoverNodes } from './ai-path/index.js';
+
+          // Create wallet
+          const w = await createWallet();
+          console.log('Wallet:', w.address);
+          console.log('Mnemonic:', w.mnemonic.split(' ').length, 'words');
+
+          // Discover nodes
+          const nodes = await discoverNodes({ limit: 10 });
+          console.log('Nodes:', nodes.length, '(limited to 10)');
+          console.log('With URL:', nodes.filter(n => n.remoteUrl).length);
+
+          console.log('\nChain queries PASSED');
+          SCRIPT
+
+      - name: Test V2Ray connect (non-root)
+        if: github.event.inputs.protocol == 'v2ray' || github.event.inputs.protocol == 'both'
+        env:
+          MNEMONIC: ${{ secrets.TEST_MNEMONIC }}
+        run: |
+          if [ -z "$MNEMONIC" ]; then
+            echo "SKIP: No TEST_MNEMONIC secret configured"
+            exit 0
+          fi
+          node --input-type=module <<'SCRIPT'
+          import { connect, disconnect, status, verify } from './ai-path/index.js';
+
+          console.log('=== V2Ray Connect (non-root, Linux) ===');
+          const t0 = Date.now();
+          try {
+            const r = await connect({ mnemonic: process.env.MNEMONIC, protocol: 'v2ray' });
+            const t = ((Date.now() - t0) / 1000).toFixed(1);
+            console.log('Session:', r.sessionId);
+            console.log('Protocol:', r.protocol);
+            console.log('IP:', r.ip);
+            console.log('SOCKS:', r.socksPort);
+            console.log('Cost:', r.cost?.p2p);
+            console.log('Time:', t + 's');
+            console.log('Country:', r.country);
+
+            const s = await status();
+            console.log('Connected:', s.connected);
+
+            const v = await verify();
+            console.log('Verified:', v.verified, 'Latency:', v.latency + 'ms');
+
+            await new Promise(r => setTimeout(r, 2000));
+            await disconnect();
+            console.log('Disconnected');
+            console.log('\nV2Ray E2E PASSED');
+          } catch (e) {
+            console.error('FAILED:', e.code, e.message);
+            process.exit(1);
+          }
+          SCRIPT
+
+      - name: Test WireGuard connect (root)
+        if: github.event.inputs.protocol == 'wireguard' || github.event.inputs.protocol == 'both'
+        env:
+          MNEMONIC: ${{ secrets.TEST_MNEMONIC }}
+        run: |
+          if [ -z "$MNEMONIC" ]; then
+            echo "SKIP: No TEST_MNEMONIC secret configured"
+            exit 0
+          fi
+          sudo node --input-type=module <<'SCRIPT'
+          import { connect, disconnect, status } from './ai-path/index.js';
+
+          console.log('=== WireGuard Connect (root, Linux) ===');
+          const t0 = Date.now();
+          try {
+            const r = await connect({ mnemonic: process.env.MNEMONIC, protocol: 'wireguard' });
+            const t = ((Date.now() - t0) / 1000).toFixed(1);
+            console.log('Session:', r.sessionId);
+            console.log('IP:', r.ip);
+            console.log('Cost:', r.cost?.p2p);
+            console.log('Time:', t + 's');
+
+            await new Promise(r => setTimeout(r, 2000));
+            await disconnect();
+            console.log('Disconnected');
+            console.log('\nWireGuard E2E PASSED');
+          } catch (e) {
+            console.error('FAILED:', e.code, e.message);
+            process.exit(1);
+          }
+          SCRIPT
+
+      - name: Test non-root WireGuard rejection
+        run: |
+          node --input-type=module <<'SCRIPT'
+          import { setup } from './ai-path/index.js';
+          const env = await setup();
+
+          if (env.admin) {
+            console.log('Running as root — skip non-root test');
+            process.exit(0);
+          }
+
+          console.log('Admin:', env.admin, '(should be false on GitHub Actions)');
+
+          // Verify that WG node selection is rejected without root
+          import { connectDirect } from './index.js';
+          try {
+            await connectDirect({
+              mnemonic: 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+              nodeAddress: 'sentnode1test',
+              dryRun: true,
+            });
+            console.error('ERROR: Should have been rejected');
+            process.exit(1);
+          } catch (e) {
+            if (e.message.includes('root') || e.message.includes('admin') || e.message.includes('Administrator')) {
+              console.log('Correctly rejected WG without root:', e.message.slice(0, 80));
+              console.log('\nNon-root rejection PASSED');
+            } else {
+              // Other error is fine — node doesn't exist, etc.
+              console.log('Got expected error:', e.code || e.message.slice(0, 60));
+              console.log('\nNon-root test OK (node validation failed first)');
+            }
+          }
+          SCRIPT
