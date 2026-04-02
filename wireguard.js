@@ -204,6 +204,9 @@ export async function installWgTunnel(confPath) {
 
     return activeTunnelName;
   } else if (WG_QUICK) {
+    // Force-remove any existing tunnel with this name before installing (prevents "already exists" on Linux)
+    try { execFileSync(WG_QUICK, ['down', name], { timeout: 10_000, stdio: 'pipe' }); } catch {}
+    await sleep(500);
     execFileSync(WG_QUICK, ['up', confPath], { timeout: 30_000, stdio: 'inherit' });
     activeTunnelConf = confPath;
     activeTunnelName = name;
