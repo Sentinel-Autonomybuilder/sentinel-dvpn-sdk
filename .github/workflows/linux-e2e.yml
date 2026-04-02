@@ -28,7 +28,10 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --ignore-scripts
+
+      - name: Download V2Ray binary
+        run: node bin/setup.js || true
 
       - name: Check environment
         run: |
