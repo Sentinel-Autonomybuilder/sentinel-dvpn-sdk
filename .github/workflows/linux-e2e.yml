@@ -31,7 +31,17 @@ jobs:
         run: npm install --ignore-scripts
 
       - name: Download V2Ray binary
-        run: node bin/setup.js || true
+        run: |
+          # Direct download with curl (faster than setup.js HTTP client on CI)
+          V2RAY_URL="https://github.com/v2fly/v2ray-core/releases/download/v5.2.1/v2ray-linux-64.zip"
+          curl -sSL -o /tmp/v2ray.zip "$V2RAY_URL" --connect-timeout 30 --max-time 120 || {
+            echo "V2Ray download timed out — skipping V2Ray tests"
+            exit 0
+          }
+          mkdir -p bin
+          cd bin && unzip -o /tmp/v2ray.zip v2ray geoip.dat geosite.dat 2>/dev/null
+          chmod +x v2ray 2>/dev/null
+          ls -la v2ray && echo "V2Ray installed" || echo "V2Ray install failed"
 
       - name: Check environment
         run: |
