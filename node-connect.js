@@ -2782,8 +2782,11 @@ function validateTunnelRequirements(serviceType, v2rayExePath) {
     if (!WG_AVAILABLE) {
       throw new TunnelError(ErrorCodes.WG_NOT_AVAILABLE, 'WireGuard node selected but WireGuard is not installed. Download from https://download.wireguard.com/windows-client/wireguard-installer.exe');
     }
-    if (process.platform === 'win32' && !IS_ADMIN) {
-      throw new TunnelError(ErrorCodes.TUNNEL_SETUP_FAILED, 'WireGuard requires administrator privileges. Restart your application as Administrator.');
+    if (!IS_ADMIN) {
+      const hint = process.platform === 'win32'
+        ? 'Restart your application as Administrator.'
+        : 'Run with sudo, or use V2Ray nodes instead (no root needed).';
+      throw new TunnelError(ErrorCodes.TUNNEL_SETUP_FAILED, `WireGuard requires ${process.platform === 'win32' ? 'administrator' : 'root'} privileges. ${hint}`);
     }
   }
   return v2rayExePath;
