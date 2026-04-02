@@ -1,6 +1,6 @@
 {
   "name": "sentinel-dvpn-sdk",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Decentralized VPN SDK for the Sentinel P2P bandwidth network. WireGuard + V2Ray tunnels, Cosmos blockchain, 900+ nodes across 90+ countries.",
   "type": "module",
   "main": "index.js",
