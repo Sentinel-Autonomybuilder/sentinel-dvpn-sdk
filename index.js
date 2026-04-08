@@ -225,6 +225,16 @@ export {
   encodeMsgUpdateNodeStatus,
   // Plan details update (v3)
   encodeMsgUpdatePlanDetails,
+  // EncodeObject builders (return { typeUrl, value } for signAndBroadcast)
+  buildMsgStartSession,
+  buildMsgEndSession,
+  buildMsgStartSubscription,
+  buildMsgSubStartSession,
+  buildMsgCancelSubscription,
+  buildMsgRenewSubscription,
+  buildMsgShareSubscription,
+  buildMsgUpdateSubscription,
+  buildMsgUpdateSession,
 } from './v3protocol.js';
 
 // ─── State Persistence (crash recovery) ─────────────────────────────────────

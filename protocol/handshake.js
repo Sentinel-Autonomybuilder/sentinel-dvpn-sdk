@@ -52,7 +52,8 @@ export function validateCIDR(cidr) {
  * Returns a normalised object compatible with the rest of the codebase.
  */
 export async function nodeStatusV3(remoteUrl, agent) {
-  const url = remoteUrl.replace(/\/+$/, '');
+  const stripped = remoteUrl.replace(/\/+$/, '').trim();
+  const url = stripped.startsWith('http') ? stripped : `https://${stripped}`;
   const before = Date.now();
   const res = await axios.get(url + '/', { httpsAgent: agent || httpsAgent, timeout: 12_000 });
   const after = Date.now();

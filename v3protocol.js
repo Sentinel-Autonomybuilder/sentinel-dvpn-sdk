@@ -62,7 +62,8 @@ export function validateCIDR(cidr) {
  * Returns a normalised object compatible with the rest of the codebase.
  */
 export async function nodeStatusV3(remoteUrl, agent) {
-  const url = remoteUrl.replace(/\/+$/, '');
+  const stripped = remoteUrl.replace(/\/+$/, '').trim();
+  const url = stripped.startsWith('http') ? stripped : `https://${stripped}`;
   const before = Date.now();
   const res = await axios.get(url + '/', { httpsAgent: agent || httpsAgent, timeout: 12_000 });
   const after = Date.now();
@@ -1016,4 +1017,37 @@ export async function initHandshakeV3V2Ray(remoteUrl, sessionId, cosmosPrivKey, 
     config: v2rayConfig,
     serverEndpoints: result.addrs || [],
   };
+}
+
+// ─── EncodeObject Builders ─────────────────────────────────────────────────
+// These return { typeUrl, value } objects ready for signAndBroadcast().
+// The encodeMsg* functions above return raw protobuf bytes (for the registry).
+// Use these build* functions when calling broadcast/signAndBroadcast directly.
+
+export function buildMsgStartSession(params) {
+  return { typeUrl: '/sentinel.node.v3.MsgStartSessionRequest', value: encodeMsgStartSession(params) };
+}
+export function buildMsgEndSession(params) {
+  return { typeUrl: '/sentinel.session.v3.MsgCancelSessionRequest', value: encodeMsgEndSession(params) };
+}
+export function buildMsgStartSubscription(params) {
+  return { typeUrl: '/sentinel.subscription.v3.MsgStartSubscriptionRequest', value: encodeMsgStartSubscription(params) };
+}
+export function buildMsgSubStartSession(params) {
+  return { typeUrl: '/sentinel.subscription.v3.MsgStartSessionRequest', value: encodeMsgSubStartSession(params) };
+}
+export function buildMsgCancelSubscription(params) {
+  return { typeUrl: '/sentinel.subscription.v3.MsgCancelSubscriptionRequest', value: encodeMsgCancelSubscription(params) };
+}
+export function buildMsgRenewSubscription(params) {
+  return { typeUrl: '/sentinel.subscription.v3.MsgRenewSubscriptionRequest', value: encodeMsgRenewSubscription(params) };
+}
+export function buildMsgShareSubscription(params) {
+  return { typeUrl: '/sentinel.subscription.v3.MsgShareSubscriptionRequest', value: encodeMsgShareSubscription(params) };
+}
+export function buildMsgUpdateSubscription(params) {
+  return { typeUrl: '/sentinel.subscription.v3.MsgUpdateSubscriptionRequest', value: encodeMsgUpdateSubscription(params) };
+}
+export function buildMsgUpdateSession(params) {
+  return { typeUrl: '/sentinel.session.v3.MsgUpdateSessionRequest', value: encodeMsgUpdateSession(params) };
 }
