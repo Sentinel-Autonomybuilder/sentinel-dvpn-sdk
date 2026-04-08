@@ -1,45 +1,63 @@
 {
   "name": "sentinel-dvpn-sdk",
-  "version": "1.2.4",
-  "description": "Decentralized VPN SDK for the Sentinel P2P bandwidth network. WireGuard + V2Ray tunnels, Cosmos blockchain, 900+ nodes across 90+ countries.",
+  "version": "1.3.1",
+  "description": "Decentralized VPN SDK for the Sentinel P2P bandwidth network. WireGuard + V2Ray tunnels, Cosmos blockchain, 900+ nodes across 90+ countries. TypeScript types included.",
   "type": "module",
   "main": "index.js",
+  "types": "types/index.d.ts",
   "bin": {
     "sentinel": "./cli/index.js",
     "sentinel-ai": "./ai-path/cli.js"
   },
   "exports": {
-    ".": "./index.js",
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./index.js"
+    },
+    "./consumer": "./consumer.js",
+    "./operator": "./operator.js",
     "./ai-path": "./ai-path/index.js"
+  },
+  "typesVersions": {
+    "*": {
+      "types/*": ["types/*"]
+    }
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "files": [
     "*.js",
+    "types/",
     "chain/",
-    "wallet/",
+    "connection/",
     "protocol/",
+    "wallet/",
     "security/",
     "pricing/",
+    "speedtest/",
     "state/",
+    "client/",
     "cli/",
-    "bin/setup.js",
     "config/",
     "errors/",
+    "examples/",
     "ai-path/",
+    "bin/setup.js",
+    "tsconfig.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node -e \"import('./index.js').then(m => console.log('OK:', Object.keys(m).length, 'exports'))\"",
+    "test": "node test/smoke.js",
+    "test:exports": "node -e \"import('./index.js').then(m => console.log(Object.keys(m).length + ' exports OK'))\"",
     "postinstall": "node bin/setup.js || true"
   },
   "keywords": [
     "vpn", "dvpn", "sentinel", "decentralized", "wireguard", "v2ray",
     "p2p", "privacy", "cosmos", "blockchain", "socks5", "tunnel",
-    "bandwidth", "peer-to-peer", "censorship-resistant"
+    "bandwidth", "peer-to-peer", "censorship-resistant", "typescript"
   ],
   "license": "MIT",
   "repository": {
