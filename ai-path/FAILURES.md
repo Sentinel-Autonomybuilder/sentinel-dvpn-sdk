@@ -27,7 +27,7 @@
 | 16 | **Chain lag** -- node's RPC may not see session for 10s after broadcast | timing | "Session does not exist" on handshake |
 | 17 | **Verify-before-capture for WireGuard** -- test with split IPs first, then switch to full tunnel | tunnel | 78s of dead internet on failure |
 | 18 | **`autoReconnect()` checks `status?.connected` but that property doesn't exist** -- use `!!status` | protocol | Entire reconnect feature is broken |
-| 19 | **Never `taskkill /F /IM node.exe`** -- Claude Code runs on Node.js | dependencies | Kills development environment |
+| 19 | **Never `taskkill /F /IM node.exe`** -- it kills ALL Node.js processes on the machine | dependencies | Kills development environment |
 | 20 | **`BigInt` cannot be JSON.stringify'd** -- convert sessionId to string before serialization | protocol | TypeError crash |
 | 21 | **Error code strings are a CONTRACT between SDKs** -- `SESSION_EXISTS` must match exactly | parity | Cross-language apps break |
 | 22 | **Unit tests prove nothing about live chain** -- 656 tests passed, zero features worked | testing | False confidence |
@@ -160,7 +160,7 @@
 | D1 | V2Ray version mismatch | Connections fail with no clear error | V2Ray 5.44.1+ has observatory bugs; must be exactly 5.2.1 | `verifyDependencies()` checks version; `connect()` refuses incompatible V2Ray | Check V2Ray version at connect time, not just setup |
 | D2 | WireGuard not installed | "Failed to start" with no explanation | `wireguard.exe` not found on system | Pre-check before session payment; clear error message with install link | Check `wireguard.exe` exists BEFORE paying for session |
 | D3 | No admin privileges | "Service registered but never reached RUNNING state" | WireGuard service installation requires Administrator | Pre-check admin before ANY session payment; provide self-elevation helper | Check admin at step 0, not step 5 |
-| D4 | Windows `taskkill /F` kills Claude Code | Development environment dies during debugging | `taskkill /F /IM node.exe` kills ALL Node.js processes including Claude Code | Kill only by specific PID: `taskkill /F /PID <pid>` | NEVER use `/IM node.exe` -- always use `/PID` |
+| D4 | Windows `taskkill /F` kills all Node.js | Development environment dies during debugging | `taskkill /F /IM node.exe` kills ALL Node.js processes including dev tools | Kill only by specific PID: `taskkill /F /PID <pid>` | NEVER use `/IM node.exe` -- always use `/PID` |
 | D5 | Git Bash mangles `/F` flag | `taskkill /F /PID 32516` fails with "Invalid argument" | Git Bash converts `/F` to `F:/` (POSIX path conversion) | Use `//F` or `execFileSync` (bypasses shell) | Use `execFileSync` for all system commands, never string interpolation |
 | D6 | Competing VPN applications | WireGuard tunnel fails; routing table conflicts | NordVPN/ExpressVPN/etc. have active tunnels, route overrides, port conflicts | Added VPN conflict detection in pre-connect diagnostic | Detect and warn about competing VPNs before connecting |
 | D7 | WireGuard Manager Service ghost | WireGuard GUI takes over tunnel management; conflicts with programmatic control | `wireguard.exe /installmanagerservice` was called instead of `/installtunnelservice` | Never call `/installmanagerservice`; only use `/installtunnelservice` | SDK must only use direct tunnel service management |
@@ -357,21 +357,21 @@ From the C# SDK debacle (656 tests, 12 critical bugs) and Handshake dVPN integra
 Every finding traces back to a specific project. This section documents the source for traceability.
 
 ### Handshake dVPN (C# WPF)
-**Files:** `handshake-RETROSPECTIVE.md`, `handshake-STANDARDS.md`, `handshake-CLAUDE.md`, `handshake-MANIFESTO.md`, `handshake-AI-NODE-TEST-INTEGRATION.md`
+**Files:** `handshake-RETROSPECTIVE.md`, `handshake-STANDARDS.md`, `handshake-sentinel.md`, `handshake-MANIFESTO.md`, `handshake-AI-NODE-TEST-INTEGRATION.md`
 **Findings:** I1-I15, UX1-UX12, SP1-SP8, PR9-PR12, DC5-DC12, TS8-TS10
 **Summary:** 26-hour build, 135 mainnet nodes tested (118 pass, 17 fail). 54% of time wasted on undocumented issues. Discovered that C# integration requires completely reimplementing speed test, flag rendering, disk cache, and session tracking from scratch due to missing SDK components.
 
 ### Node Tester (JS Express)
-**Files:** `node-tester-HANDOFF.md`, `node-tester-CLAUDE.md`, all 12 `node-tester-suggestion-*.md` files
+**Files:** `node-tester-HANDOFF.md`, `node-tester-sentinel.md`, all 12 `node-tester-suggestion-*.md` files
 **Findings:** P1-P12, C1-C14, T1-T16, TM1-TM6, TS1-TS7, TS11-TS15, I16-I20, DC7, DC10, DC11
 **Summary:** 2200+ node tests across JS and C# SDKs. Found 24 protocol bugs. Proved Iron Rule: every node with peers > 0 that failed was our bug, not node-side. Documented complete speed test fallback chain, V2Ray config building, clock drift detection, and WireGuard lifecycle management.
 
 ### Test2 (JS SDK Proving Ground)
-**Files:** `test2-CLAUDE.md`
+**Files:** `test2-sentinel.md`
 **Findings:** P7-P9, CF1-CF4, W1-W3, D1-D4
 **Summary:** First consumer of JS SDK. Discovered autoReconnect was completely broken, BigInt serialization crash, broadcast name collision, fullTunnel default bricking AI's internet, and missing cleanup handler registration.
 
-### ClaudeDVPN / C# SDK (EXE)
+### Desktop dVPN / C# SDK (EXE)
 **Findings:** C1-C14, PR1-PR8, S1-S7, TS1-TS3, DC1-DC4
 **Summary:** 656 unit tests passing with zero working features on mainnet. Proved that unit tests are meaningless without live chain integration tests. Found all v2/v3 field name mismatches, MsgEndSession not registered, 27 command injection surfaces, and parity gaps.
 

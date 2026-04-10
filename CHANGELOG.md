@@ -197,7 +197,7 @@ If found elsewhere, it logs `"V2Ray binary found at: <path> (auto-detected)"` an
 
 ### 14. `node.exe` Kill Protection
 
-**NEVER run `taskkill /F /IM node.exe`** on Windows. This kills your own Node.js process, Claude Code, VS Code terminals, and anything else running on Node. Kill V2Ray by image name (`v2ray.exe`) or specific processes by PID only.
+**NEVER run `taskkill /F /IM node.exe`** on Windows. This kills your own Node.js process, VS Code terminals, and anything else running on Node. Kill V2Ray by image name (`v2ray.exe`) or specific processes by PID only.
 
 ### 15. Removed Unused `dotenv` from SDK Dependencies
 
