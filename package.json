@@ -1,6 +1,6 @@
 {
   "name": "sentinel-dvpn-sdk",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Decentralized VPN SDK for the Sentinel P2P bandwidth network. WireGuard + V2Ray tunnels, Cosmos blockchain, 900+ nodes across 90+ countries. TypeScript types included.",
   "type": "module",
   "main": "index.js",
@@ -16,11 +16,17 @@
     },
     "./consumer": "./consumer.js",
     "./operator": "./operator.js",
-    "./ai-path": "./ai-path/index.js"
+    "./ai-path": "./ai-path/index.js",
+    "./blue": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "typesVersions": {
     "*": {
-      "types/*": ["types/*"]
+      "types/*": [
+        "types/*"
+      ]
     }
   },
   "engines": {
@@ -44,20 +50,40 @@
     "examples/",
     "ai-path/",
     "bin/setup.js",
+    "dist/",
+    "src/",
+    "generated/",
+    "proto/",
     "tsconfig.json",
+    "tsconfig.build.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "npx tsc --project tsconfig.build.json",
+    "proto:generate": "npx protoc --ts_proto_out=generated --ts_proto_opt=esModuleInterop=true --ts_proto_opt=env=node --ts_proto_opt=outputTypeRegistry=true --proto_path=proto proto/sentinel/types/v1/*.proto proto/sentinel/node/v3/*.proto proto/sentinel/session/v3/*.proto proto/sentinel/plan/v3/*.proto proto/sentinel/subscription/v3/*.proto proto/sentinel/lease/v1/*.proto proto/sentinel/provider/v2/*.proto",
     "test": "node test/smoke.js",
     "test:exports": "node -e \"import('./index.js').then(m => console.log(Object.keys(m).length + ' exports OK'))\"",
     "postinstall": "node bin/setup.js || true"
   },
   "keywords": [
-    "vpn", "dvpn", "sentinel", "decentralized", "wireguard", "v2ray",
-    "p2p", "privacy", "cosmos", "blockchain", "socks5", "tunnel",
-    "bandwidth", "peer-to-peer", "censorship-resistant", "typescript"
+    "vpn",
+    "dvpn",
+    "sentinel",
+    "decentralized",
+    "wireguard",
+    "v2ray",
+    "p2p",
+    "privacy",
+    "cosmos",
+    "blockchain",
+    "socks5",
+    "tunnel",
+    "bandwidth",
+    "peer-to-peer",
+    "censorship-resistant",
+    "typescript"
   ],
   "license": "MIT",
   "repository": {
@@ -69,14 +95,19 @@
   },
   "homepage": "https://github.com/Sentinel-Autonomybuilder/sentinel-dvpn-sdk#readme",
   "dependencies": {
-    "@cosmjs/stargate": "0.32.2",
     "@cosmjs/amino": "0.32.2",
     "@cosmjs/crypto": "0.32.2",
     "@cosmjs/encoding": "0.32.2",
     "@cosmjs/proto-signing": "0.32.2",
+    "@cosmjs/stargate": "0.32.2",
     "@noble/curves": "^1.4.0",
     "axios": "^1.7.0",
-    "socks-proxy-agent": "^8.0.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "socks-proxy-agent": "^8.0.0"
+  },
+  "devDependencies": {
+    "@bufbuild/protobuf": "^2.11.0",
+    "ts-proto": "^2.11.6",
+    "typescript": "^6.0.2"
   }
 }

@@ -304,6 +304,14 @@ export {
   rpcQueryBalance,
 } from './chain/rpc.js';
 
+// ─── TypeScript Client (extends CosmJS SigningStargateClient) ───────────────
+
+export {
+  BlueSentinelClient,
+  SentinelQueryClient,
+  SentinelWsClient,
+} from './dist/index.js';
+
 // ─── State Persistence (crash recovery) ─────────────────────────────────────
 
 export {
