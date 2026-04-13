@@ -58,8 +58,17 @@ export {
   rpcQueryBalance,
   rpcQueryNode,
   // v1.5.2: Session recovery (referenced in docs but was missing from exports)
-  recoverOrphans,
+  recoverOrphans as recoverSession,
+  // v2.0.2: Plan operations for AI agents using subscription-based access
+  connectViaSubscription,
+  connectViaPlan,
+  subscribeToPlan,
+  hasActiveSubscription,
+  querySubscriptions,
+  queryPlanNodes,
+  queryFeeGrants,
+  buildFeeGrantMsg,
+  broadcastWithFeeGrant,
+  rpcQueryNodesForPlan,
+  rpcQuerySubscriptionsForAccount,
 } from '../index.js';
-
-// Re-export recoverOrphans as recoverSession (the name used in ai-path docs)
-export { recoverOrphans as recoverSession };
