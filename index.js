@@ -307,6 +307,10 @@ export {
   rpcQueryPlan,
   rpcQueryBalance,
   rpcQueryFeeGrant,
+  rpcQueryFeeGrants,
+  rpcQueryFeeGrantsIssued,
+  rpcQueryAuthzGrants,
+  rpcQueryProvider,
 } from './chain/rpc.js';
 
 // ─── Subscription Sharing (plan operator → user onboarding) ────────────────
@@ -384,6 +388,15 @@ export {
   DEFAULT_DNS_PRESET,
   DNS_FALLBACK_ORDER,
   resolveDnsServers,
+  // Runtime endpoint management
+  addRpcEndpoint,
+  addLcdEndpoint,
+  removeRpcEndpoint,
+  removeLcdEndpoint,
+  setEndpoints,
+  getEndpoints,
+  checkRpcEndpointHealth,
+  optimizeEndpoints,
 } from './defaults.js';
 
 // ─── Typed Errors ────────────────────────────────────────────────────────────

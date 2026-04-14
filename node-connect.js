@@ -33,9 +33,13 @@ import os from 'os';
 
 import {
   createWallet, privKeyFromMnemonic, createClient, broadcast, broadcastWithFeeGrant,
-  extractId, findExistingSession, getBalance, MSG_TYPES, resolveNodeUrl,
-  fetchActiveNodes, filterNodes, queryNode, buildEndSessionMsg,
+  extractId, getBalance, MSG_TYPES,
+  filterNodes, buildEndSessionMsg,
 } from './cosmjs-setup.js';
+
+import {
+  findExistingSession, fetchActiveNodes, queryNode, resolveNodeUrl,
+} from './chain/queries.js';
 
 import {
   nodeStatusV3, generateWgKeyPair, initHandshakeV3,

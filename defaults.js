@@ -25,7 +25,7 @@ axios.defaults.adapter = 'http';
 // This is the npm/semver version for consumers. Internal development iterations
 // (v20, v21, v22, etc.) track feature milestones and are not exposed as exports.
 
-export const SDK_VERSION = '1.0.0';
+export const SDK_VERSION = '2.3.0';
 
 // ─── Timestamps ──────────────────────────────────────────────────────────────
 
@@ -363,4 +363,124 @@ export async function tryWithFallback(endpoints, operation, label = 'operation')
   // Lazy import to avoid circular dependency (errors.js is simple, no deps)
   const { ChainError } = await import('./errors.js');
   throw new ChainError('ALL_ENDPOINTS_FAILED', `${label} failed on all ${endpoints.length} endpoints (verified ${LAST_VERIFIED}):\n${tried}\n\nAll endpoints may be down, or your network may be blocking HTTPS. Try curl-ing the URLs manually.`, { endpoints: errors });
+}
+
+// ─── Runtime Endpoint Management ────────────────────────────────────────────
+// Add/remove/reorder RPC and LCD endpoints at runtime without code changes.
+// The arrays above are `const` but are Objects (mutable contents).
+
+/**
+ * Add an RPC endpoint at runtime. Skips if URL already exists.
+ * @param {string} url - RPC URL (e.g. 'https://rpc.newprovider.com')
+ * @param {string} [name='Custom'] - Provider name
+ * @param {boolean} [prepend=false] - If true, adds to front (highest priority)
+ */
+export function addRpcEndpoint(url, name = 'Custom', prepend = false) {
+  if (RPC_ENDPOINTS.some(e => e.url === url)) return;
+  const entry = { url, name, verified: new Date().toISOString().slice(0, 10) };
+  prepend ? RPC_ENDPOINTS.unshift(entry) : RPC_ENDPOINTS.push(entry);
+}
+
+/**
+ * Add an LCD endpoint at runtime. Skips if URL already exists.
+ * @param {string} url - LCD URL (e.g. 'https://api.newprovider.com')
+ * @param {string} [name='Custom'] - Provider name
+ * @param {boolean} [prepend=false] - If true, adds to front (highest priority)
+ */
+export function addLcdEndpoint(url, name = 'Custom', prepend = false) {
+  if (LCD_ENDPOINTS.some(e => e.url === url)) return;
+  const entry = { url, name, verified: new Date().toISOString().slice(0, 10) };
+  prepend ? LCD_ENDPOINTS.unshift(entry) : LCD_ENDPOINTS.push(entry);
+}
+
+/**
+ * Remove an RPC endpoint by URL.
+ * @param {string} url
+ */
+export function removeRpcEndpoint(url) {
+  const idx = RPC_ENDPOINTS.findIndex(e => e.url === url);
+  if (idx !== -1) RPC_ENDPOINTS.splice(idx, 1);
+}
+
+/**
+ * Remove an LCD endpoint by URL.
+ * @param {string} url
+ */
+export function removeLcdEndpoint(url) {
+  const idx = LCD_ENDPOINTS.findIndex(e => e.url === url);
+  if (idx !== -1) LCD_ENDPOINTS.splice(idx, 1);
+}
+
+/**
+ * Replace ALL endpoints at once (e.g. from a config file or remote registry).
+ * @param {'rpc'|'lcd'} type
+ * @param {Array<{url: string, name?: string}>} endpoints
+ */
+export function setEndpoints(type, endpoints) {
+  const target = type === 'rpc' ? RPC_ENDPOINTS : LCD_ENDPOINTS;
+  target.length = 0;
+  for (const ep of endpoints) {
+    target.push({ url: ep.url, name: ep.name || 'Custom', verified: new Date().toISOString().slice(0, 10) });
+  }
+}
+
+/**
+ * Get current endpoint lists (for inspection/debugging).
+ * @returns {{ rpc: Array, lcd: Array }}
+ */
+export function getEndpoints() {
+  return { rpc: [...RPC_ENDPOINTS], lcd: [...LCD_ENDPOINTS] };
+}
+
+/**
+ * Health-check RPC endpoints and reorder by latency (fastest first).
+ * Uses Tendermint /status endpoint which returns node info + sync status.
+ * @param {number} [timeoutMs=5000] - Timeout per endpoint
+ * @returns {Promise<Array<{url: string, name: string, latencyMs: number|null, blockHeight?: number}>>}
+ */
+export async function checkRpcEndpointHealth(timeoutMs = 5000) {
+  const results = await Promise.all(RPC_ENDPOINTS.map(async (ep) => {
+    const start = Date.now();
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const resp = await axios.get(`${ep.url}/status`, { signal: controller.signal, timeout: timeoutMs });
+      clearTimeout(timer);
+      const height = parseInt(resp.data?.result?.sync_info?.latest_block_height || '0', 10);
+      return { ...ep, latencyMs: Date.now() - start, blockHeight: height };
+    } catch {
+      return { ...ep, latencyMs: null };
+    }
+  }));
+  return results.sort((a, b) => {
+    if (a.latencyMs != null && b.latencyMs != null) return a.latencyMs - b.latencyMs;
+    if (a.latencyMs != null) return -1;
+    if (b.latencyMs != null) return 1;
+    return 0;
+  });
+}
+
+/**
+ * Health-check both RPC and LCD endpoints, reorder by latency.
+ * Moves fastest-responding endpoints to the front of each array.
+ * @param {number} [timeoutMs=5000]
+ * @returns {Promise<{ rpc: Array, lcd: Array }>}
+ */
+export async function optimizeEndpoints(timeoutMs = 5000) {
+  const [rpcResults, lcdResults] = await Promise.all([
+    checkRpcEndpointHealth(timeoutMs),
+    checkEndpointHealth(LCD_ENDPOINTS, timeoutMs),
+  ]);
+  // Reorder arrays in-place: healthy first, by latency
+  const reorder = (target, results) => {
+    const healthy = results.filter(r => r.latencyMs != null);
+    const dead = results.filter(r => r.latencyMs == null);
+    target.length = 0;
+    for (const r of [...healthy, ...dead]) {
+      target.push({ url: r.url, name: r.name, verified: r.verified || LAST_VERIFIED });
+    }
+  };
+  reorder(RPC_ENDPOINTS, rpcResults);
+  reorder(LCD_ENDPOINTS, lcdResults);
+  return { rpc: rpcResults, lcd: lcdResults };
 }

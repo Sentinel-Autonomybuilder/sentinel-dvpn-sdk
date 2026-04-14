@@ -1,6 +1,6 @@
 {
   "name": "blue-js-sdk",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Decentralized VPN SDK for the Sentinel P2P bandwidth network. WireGuard + V2Ray tunnels, Cosmos blockchain, 900+ nodes. Tested on Windows. macOS/Linux support included but untested.",
   "type": "module",
   "main": "index.js",

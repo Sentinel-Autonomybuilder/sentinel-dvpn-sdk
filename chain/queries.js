@@ -30,6 +30,8 @@ import {
   rpcQuerySubscriptionAllocations as rpcQuerySubAllocations,
   rpcQueryPlan,
   rpcQueryBalance,
+  rpcQueryProvider as _rpcQueryProvider,
+  rpcQueryAuthzGrants as _rpcQueryAuthzGrants,
 } from './rpc.js';
 
 // Re-export for convenience
@@ -674,7 +676,7 @@ export async function queryPlanNodes(planId, lcdUrl) {
 
 /**
  * Discover all available plans with metadata (subscriber count, node count, price).
- * Probes plan IDs 1-maxId, returns plans with >=1 subscriber.
+ * RPC-first: probes plan IDs via rpcQueryPlan, falls back to LCD.
  *
  * @param {string} [lcdUrl]
  * @param {object} [opts]
@@ -690,19 +692,61 @@ export async function discoverPlans(lcdUrl, opts = {}) {
   const baseLcd = lcdUrl || LCD_ENDPOINTS[0].url;
   const plans = [];
 
+  // Try to get RPC client for plan queries
+  let rpc = null;
+  try { rpc = await getRpcClient(); } catch { /* LCD only */ }
+
   for (let batch = 0; batch < Math.ceil(maxId / batchSize); batch++) {
     const probes = [];
     for (let i = batch * batchSize + 1; i <= Math.min((batch + 1) * batchSize, maxId); i++) {
       probes.push((async (id) => {
         try {
-          const subData = await lcd(baseLcd, `/sentinel/subscription/v3/plans/${id}/subscriptions?pagination.limit=1&pagination.count_total=true`);
-          const subCount = parseInt(subData.pagination?.total || '0', 10);
+          // RPC-first: query plan existence via RPC
+          let plan = null;
+          if (rpc) {
+            try { plan = await rpcQueryPlan(rpc, id); } catch { /* fall through */ }
+          }
+
+          // Get subscriber count — RPC for plan subs, LCD as fallback
+          let subCount = 0;
+          let price = null;
+          if (rpc) {
+            try {
+              const subs = await rpcQuerySubscriptionsForPlan(rpc, id, { limit: 1 });
+              subCount = subs.length; // Quick check — at least 1
+              price = subs[0]?.price || null;
+              // If RPC returned subs, plan exists even if rpcQueryPlan returned null
+              if (subCount > 0 && !plan) plan = { id };
+            } catch { /* fall through */ }
+          }
+          if (!plan && subCount === 0) {
+            // LCD fallback for subscriber count
+            try {
+              const subData = await lcd(baseLcd, `/sentinel/subscription/v3/plans/${id}/subscriptions?pagination.limit=1&pagination.count_total=true`);
+              subCount = parseInt(subData.pagination?.total || '0', 10);
+              price = subData.subscriptions?.[0]?.price || null;
+              if (subCount > 0) plan = { id };
+            } catch { /* plan doesn't exist */ }
+          }
+
+          if (!plan && !includeEmpty) return null;
           if (subCount === 0 && !includeEmpty) return null;
-          // Plan nodes endpoint has broken pagination (count_total wrong, next_key null).
-          // Use limit=5000 single request and count the actual array.
-          const nodeData = await lcd(baseLcd, `/sentinel/node/v3/plans/${id}/nodes?pagination.limit=5000`);
-          const nodeCount = (nodeData.nodes || []).length;
-          const price = subData.subscriptions?.[0]?.price || null;
+
+          // Get node count — RPC-first
+          let nodeCount = 0;
+          if (rpc) {
+            try {
+              const nodes = await rpcQueryNodesForPlan(rpc, id, { status: 1, limit: 5000 });
+              nodeCount = nodes.length;
+            } catch { /* fall through to LCD */ }
+          }
+          if (nodeCount === 0) {
+            try {
+              const nodeData = await lcd(baseLcd, `/sentinel/node/v3/plans/${id}/nodes?pagination.limit=5000`);
+              nodeCount = (nodeData.nodes || []).length;
+            } catch { /* no nodes */ }
+          }
+
           return { id, subscribers: subCount, nodeCount, price, hasNodes: nodeCount > 0 };
         } catch { return null; }
       })(i));
@@ -716,16 +760,49 @@ export async function discoverPlans(lcdUrl, opts = {}) {
 
 /**
  * Get provider details by address.
+ * RPC-first with LCD fallback. Provider is still v2 on chain.
  * @param {string} provAddress - sentprov1... address
  * @param {object} [opts]
  * @param {string} [opts.lcdUrl]
  * @returns {Promise<object|null>}
  */
 export async function getProviderByAddress(provAddress, opts = {}) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      const provider = await _rpcQueryProvider(rpc, provAddress);
+      if (provider) return provider;
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
   try {
     const data = await lcdQuery(`/sentinel/provider/v2/providers/${provAddress}`, opts);
     return data.provider || null;
   } catch { return null; }
+}
+
+/**
+ * Query authz grants between granter and grantee.
+ * RPC-first with LCD fallback.
+ * @param {string} lcdUrl - LCD endpoint
+ * @param {string} granter - Granter address (sent1...)
+ * @param {string} grantee - Grantee address (sent1...)
+ * @returns {Promise<Array>}
+ */
+export async function queryAuthzGrants(lcdUrl, granter, grantee) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      return await _rpcQueryAuthzGrants(rpc, granter, grantee);
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
+  const { items } = await lcdPaginatedSafe(lcdUrl, `/cosmos/authz/v1beta1/grants?granter=${granter}&grantee=${grantee}`, 'grants');
+  return items;
 }
 
 // ─── VPN Settings Persistence ────────────────────────────────────────────────

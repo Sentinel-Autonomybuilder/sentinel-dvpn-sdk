@@ -21,7 +21,7 @@ import path from 'path';
 import os from 'os';
 import { ChainError, ErrorCodes } from './errors.js';
 import { DEFAULT_LCD } from './defaults.js';
-import { lcdPaginatedSafe } from './cosmjs-setup.js';
+import { querySessions } from './chain/queries.js';
 import { loadPoisonedKeys, savePoisonedKeys } from './state.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -94,11 +94,11 @@ export class SessionManager {
     }
 
     const map = new Map();
-    const queryPath = `/sentinel/session/v3/sessions?address=${addr}&status=1`;
 
     let items;
     try {
-      const result = await lcdPaginatedSafe(this._lcdUrl, queryPath, 'sessions');
+      // RPC-first via chain/queries.js — returns flattened sessions
+      const result = await querySessions(addr, this._lcdUrl, { status: '1' });
       items = result.items || [];
     } catch (err) {
       throw new ChainError(
@@ -109,13 +109,15 @@ export class SessionManager {
     }
 
     for (const s of items) {
+      // querySessions returns flat sessions (base_session unwrapped)
       const bs = s.base_session || s;
       const nodeAddr = bs.node_address || bs.node;
       if (!nodeAddr) continue;
 
       const acct = bs.acc_address || bs.address;
       if (acct && acct !== addr) continue;
-      if (bs.status && bs.status !== 'active') continue;
+      // RPC returns status as number (1=active), LCD as string
+      if (bs.status && bs.status !== 'active' && bs.status !== 1) continue;
 
       const maxBytes = parseInt(bs.max_bytes || '0');
       const used = parseInt(bs.download_bytes || '0') + parseInt(bs.upload_bytes || '0');

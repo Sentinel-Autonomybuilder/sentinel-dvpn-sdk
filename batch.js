@@ -29,10 +29,9 @@ import { sleep } from './defaults.js';
 import {
   broadcast,
   extractAllSessionIds,
-  findExistingSession,
-  lcdPaginatedSafe,
   MSG_TYPES,
 } from './cosmjs-setup.js';
+import { findExistingSession, querySessions } from './chain/queries.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -257,18 +256,15 @@ export async function waitForBatchSessions(nodeAddrs, walletAddr, lcdUrl, option
   while (pending.size > 0 && Date.now() < deadline) {
     await sleep(pollIntervalMs);
     try {
-      const result = await lcdPaginatedSafe(
-        baseLcd,
-        `/sentinel/session/v3/sessions?address=${walletAddr}&status=1`,
-        'sessions',
-      );
+      // RPC-first via chain/queries.js — returns flattened sessions
+      const result = await querySessions(walletAddr, baseLcd, { status: '1' });
       for (const s of (result.items || [])) {
         const bs = s.base_session || s;
         const n = bs.node_address || bs.node;
         if (pending.has(n)) pending.delete(n);
       }
     } catch {
-      // Transient LCD error — will retry on next poll
+      // Transient RPC/LCD error — will retry on next poll
     }
   }
 

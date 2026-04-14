@@ -722,6 +722,175 @@ function _decodeBasicAllowance(bytes) {
   return { spend_limit: spendLimit, expiration };
 }
 
+/**
+ * Query all fee grants for a grantee via RPC.
+ * Returns array of grant objects matching LCD format.
+ *
+ * @param {{ queryClient: QueryClient }} client - From createRpcQueryClient()
+ * @param {string} grantee - Grantee address (sent1...)
+ * @param {{ limit?: number }} [opts]
+ * @returns {Promise<Array<{ granter: string, grantee: string, allowance: object }>>}
+ */
+export async function rpcQueryFeeGrants(client, grantee, { limit = 100 } = {}) {
+  const path = '/cosmos.feegrant.v1beta1.Query/Allowances';
+  const request = concat([
+    encodeString(1, grantee),
+    encodeEmbedded(2, encodePagination({ limit })),
+  ]);
+
+  try {
+    const response = await abciQuery(client.queryClient, path, request);
+    const fields = decodeProto(new Uint8Array(response));
+    // Field 1 = repeated Grant (granter, grantee, allowance)
+    return (fields[1] || []).map(entry => _decodeFeeGrant(entry.value, grantee));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Query all fee grants issued BY a granter via RPC.
+ *
+ * @param {{ queryClient: QueryClient }} client
+ * @param {string} granter - Granter address (sent1...)
+ * @param {{ limit?: number }} [opts]
+ * @returns {Promise<Array<{ granter: string, grantee: string, allowance: object }>>}
+ */
+export async function rpcQueryFeeGrantsIssued(client, granter, { limit = 100 } = {}) {
+  const path = '/cosmos.feegrant.v1beta1.Query/AllowancesByGranter';
+  const request = concat([
+    encodeString(1, granter),
+    encodeEmbedded(2, encodePagination({ limit })),
+  ]);
+
+  try {
+    const response = await abciQuery(client.queryClient, path, request);
+    const fields = decodeProto(new Uint8Array(response));
+    // Field 1 = repeated Grant
+    return (fields[1] || []).map(entry => _decodeFeeGrant(entry.value, null, granter));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Decode a cosmos.feegrant.v1beta1.Grant proto.
+ * Fields: 1=granter, 2=grantee, 3=allowance (Any)
+ */
+function _decodeFeeGrant(bytes, defaultGrantee, defaultGranter) {
+  const grantFields = decodeProto(bytes);
+  const result = {
+    granter: grantFields[1]?.[0] ? decodeString(grantFields[1][0].value) : (defaultGranter || ''),
+    grantee: grantFields[2]?.[0] ? decodeString(grantFields[2][0].value) : (defaultGrantee || ''),
+    allowance: null,
+  };
+
+  if (!grantFields[3]?.[0]) return result;
+  const anyFields = decodeProto(grantFields[3][0].value);
+  const typeUrl = anyFields[1]?.[0] ? decodeString(anyFields[1][0].value) : '';
+  const innerBytes = anyFields[2]?.[0]?.value;
+
+  if (typeUrl.includes('AllowedMsgAllowance') && innerBytes) {
+    const amFields = decodeProto(innerBytes);
+    const allowedMessages = (amFields[2] || []).map(f => decodeString(f.value));
+    let innerAllowance = null;
+    if (amFields[1]?.[0]) {
+      const innerAnyFields = decodeProto(amFields[1][0].value);
+      const innerTypeUrl = innerAnyFields[1]?.[0] ? decodeString(innerAnyFields[1][0].value) : '';
+      const basicBytes = innerAnyFields[2]?.[0]?.value;
+      if (basicBytes) {
+        innerAllowance = _decodeBasicAllowance(basicBytes);
+        innerAllowance['@type'] = innerTypeUrl;
+      }
+    }
+    result.allowance = { '@type': typeUrl, allowance: innerAllowance, allowed_messages: allowedMessages };
+  } else if (typeUrl.includes('BasicAllowance') && innerBytes) {
+    result.allowance = _decodeBasicAllowance(innerBytes);
+    result.allowance['@type'] = typeUrl;
+  } else {
+    result.allowance = { '@type': typeUrl };
+  }
+
+  return result;
+}
+
+/**
+ * Query authz grants between granter and grantee via RPC.
+ *
+ * @param {{ queryClient: QueryClient }} client
+ * @param {string} granter - Granter address (sent1...)
+ * @param {string} grantee - Grantee address (sent1...)
+ * @param {{ msgTypeUrl?: string, limit?: number }} [opts]
+ * @returns {Promise<Array<{ granter: string, grantee: string, authorization: object, expiration: string|null }>>}
+ */
+export async function rpcQueryAuthzGrants(client, granter, grantee, { msgTypeUrl, limit = 100 } = {}) {
+  const path = '/cosmos.authz.v1beta1.Query/Grants';
+  const parts = [
+    encodeString(1, granter),
+    encodeString(2, grantee),
+  ];
+  if (msgTypeUrl) parts.push(encodeString(3, msgTypeUrl));
+  parts.push(encodeEmbedded(4, encodePagination({ limit })));
+  const request = concat(parts);
+
+  try {
+    const response = await abciQuery(client.queryClient, path, request);
+    const fields = decodeProto(new Uint8Array(response));
+    // Field 1 = repeated GrantAuthorization
+    return (fields[1] || []).map(entry => {
+      const gf = decodeProto(entry.value);
+      const result = {
+        granter: gf[1]?.[0] ? decodeString(gf[1][0].value) : granter,
+        grantee: gf[2]?.[0] ? decodeString(gf[2][0].value) : grantee,
+        authorization: null,
+        expiration: gf[4]?.[0] ? decodeTimestamp(gf[4][0].value) : null,
+      };
+      // Field 3 = authorization (Any)
+      if (gf[3]?.[0]) {
+        const anyF = decodeProto(gf[3][0].value);
+        result.authorization = {
+          '@type': anyF[1]?.[0] ? decodeString(anyF[1][0].value) : '',
+        };
+      }
+      return result;
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Query a provider by address via RPC.
+ * Provider is still v2 on chain (NOT v3).
+ *
+ * @param {{ queryClient: QueryClient }} client
+ * @param {string} provAddress - sentprov1... address
+ * @returns {Promise<object|null>} Provider object or null
+ */
+export async function rpcQueryProvider(client, provAddress) {
+  const path = '/sentinel.provider.v2.QueryService/QueryProvider';
+  const request = encodeString(1, provAddress);
+
+  try {
+    const response = await abciQuery(client.queryClient, path, request);
+    const fields = decodeProto(new Uint8Array(response));
+    // Field 1 = Provider
+    if (!fields[1]?.[0]) return null;
+    const pf = decodeProto(fields[1][0].value);
+    return {
+      address: pf[1]?.[0] ? decodeString(pf[1][0].value) : provAddress,
+      name: pf[2]?.[0] ? decodeString(pf[2][0].value) : '',
+      identity: pf[3]?.[0] ? decodeString(pf[3][0].value) : '',
+      website: pf[4]?.[0] ? decodeString(pf[4][0].value) : '',
+      description: pf[5]?.[0] ? decodeString(pf[5][0].value) : '',
+      status: pf[6]?.[0] ? Number(pf[6][0].value) : 0,
+      status_at: pf[7]?.[0] ? decodeTimestamp(pf[7][0].value) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function rpcQueryBalance(client, address, denom = 'udvpn') {
   const path = '/cosmos.bank.v1beta1.Query/Balance';
   const request = concat([

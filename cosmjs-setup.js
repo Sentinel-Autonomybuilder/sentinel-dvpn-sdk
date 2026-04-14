@@ -52,9 +52,42 @@ import {
 } from './plan-operations.js';
 import { GAS_PRICE, RPC_ENDPOINTS, LCD_ENDPOINTS, tryWithFallback } from './defaults.js';
 import { ValidationError, NodeError, ChainError, ErrorCodes } from './errors.js';
-import path from 'path';
-import os from 'os';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+// path, os, fs imports removed — settings persistence now in chain/queries.js
+
+// RPC-first query layer — cosmjs-setup.js delegates query functions here
+import {
+  findExistingSession as _findExistingSession,
+  fetchActiveNodes as _fetchActiveNodes,
+  getNetworkOverview as _getNetworkOverview,
+  queryNode as _queryNode,
+  resolveNodeUrl as _resolveNodeUrl,
+  querySubscriptions as _querySubscriptions,
+  querySessionAllocation as _querySessionAllocation,
+  querySessions as _querySessions,
+  flattenSession as _flattenSession,
+  querySubscription as _querySubscription,
+  hasActiveSubscription as _hasActiveSubscription,
+  queryPlanNodes as _queryPlanNodes,
+  discoverPlans as _discoverPlans,
+  discoverPlanIds as _discoverPlanIds,
+  getNodePrices as _getNodePrices,
+  getProviderByAddress as _getProviderByAddress,
+  queryPlanSubscribers as _queryPlanSubscribers,
+  getPlanStats as _getPlanStats,
+  querySubscriptionAllocations as _querySubscriptionAllocations,
+  queryAuthzGrants as _queryAuthzGrants,
+  loadVpnSettings as _loadVpnSettings,
+  saveVpnSettings as _saveVpnSettings,
+} from './chain/queries.js';
+import {
+  queryFeeGrants as _queryFeeGrants,
+  queryFeeGrantsIssued as _queryFeeGrantsIssued,
+  queryFeeGrant as _queryFeeGrant,
+  grantPlanSubscribers as _grantPlanSubscribers,
+  getExpiringGrants as _getExpiringGrants,
+  renewExpiringGrants as _renewExpiringGrants,
+  monitorFeeGrants as _monitorFeeGrants,
+} from './chain/fee-grants.js';
 
 // ─── Input Validation Helpers ────────────────────────────────────────────────
 
@@ -472,18 +505,7 @@ export async function getBalance(client, address) {
  * Note: Sessions have a nested base_session object containing the actual data.
  */
 export async function findExistingSession(lcdUrl, walletAddr, nodeAddr) {
-  const { items } = await lcdPaginatedSafe(lcdUrl, `/sentinel/session/v3/sessions?address=${walletAddr}&status=1`, 'sessions');
-  for (const s of items) {
-    const bs = s.base_session || s;
-    if ((bs.node_address || bs.node) !== nodeAddr) continue;
-    if (bs.status && bs.status !== 'active') continue;
-    const acct = bs.acc_address || bs.address;
-    if (acct && acct !== walletAddr) continue;
-    const maxBytes = parseInt(bs.max_bytes || '0');
-    const used = parseInt(bs.download_bytes || '0') + parseInt(bs.upload_bytes || '0');
-    if (maxBytes === 0 || used < maxBytes) return BigInt(bs.id);
-  }
-  return null;
+  return _findExistingSession(lcdUrl, walletAddr, nodeAddr);
 }
 
 /**
@@ -493,13 +515,7 @@ export async function findExistingSession(lcdUrl, walletAddr, nodeAddr) {
  * This handles both formats.
  */
 export function resolveNodeUrl(node) {
-  // Try legacy field first (string with https://)
-  if (node.remote_url && typeof node.remote_url === 'string') return node.remote_url;
-  // v3 LCD: remote_addrs is an array of "IP:PORT" strings
-  const addrs = node.remote_addrs || [];
-  const raw = addrs.find(a => a.includes(':')) || addrs[0];
-  if (!raw) throw new NodeError(ErrorCodes.NODE_NOT_FOUND, `Node ${node.address} has no remote_addrs`, { address: node.address });
-  return raw.startsWith('http') ? raw : `https://${raw}`;
+  return _resolveNodeUrl(node);
 }
 
 /**
@@ -507,11 +523,7 @@ export function resolveNodeUrl(node) {
  * Returns array of node objects. Each node has `remote_url` resolved from `remote_addrs`.
  */
 export async function fetchActiveNodes(lcdUrl, limit = 500, maxPages = 20) {
-  const { items } = await lcdPaginatedSafe(lcdUrl, '/sentinel/node/v3/nodes?status=1', 'nodes', { limit });
-  for (const n of items) {
-    try { n.remote_url = resolveNodeUrl(n); } catch { /* skip nodes with no address */ }
-  }
-  return items;
+  return _fetchActiveNodes(lcdUrl, limit, maxPages);
 }
 
 /**
@@ -527,55 +539,7 @@ export async function fetchActiveNodes(lcdUrl, limit = 500, maxPages = 20) {
  *   console.log(`Average: ${overview.averagePrice.gigabyteDvpn.toFixed(3)} P2P/GB`);
  */
 export async function getNetworkOverview(lcdUrl) {
-  let nodes;
-  if (lcdUrl) {
-    nodes = await fetchActiveNodes(lcdUrl);
-  } else {
-    const result = await tryWithFallback(LCD_ENDPOINTS, fetchActiveNodes, 'getNetworkOverview');
-    nodes = result.result;
-  }
-
-  // Filter to nodes that accept udvpn
-  const active = nodes.filter(n => n.remote_url && (n.gigabyte_prices || []).some(p => p.denom === 'udvpn'));
-
-  // Count by country (from LCD metadata, limited — enrichNodes gives better data)
-  const countryMap = {};
-  for (const n of active) {
-    const c = n.location?.country || n.country || 'Unknown';
-    countryMap[c] = (countryMap[c] || 0) + 1;
-  }
-  const byCountry = Object.entries(countryMap)
-    .map(([country, count]) => ({ country, count }))
-    .sort((a, b) => b.count - a.count);
-
-  // Count by type (type not in LCD — estimate from service_type field if present)
-  const byType = { wireguard: 0, v2ray: 0, unknown: 0 };
-  for (const n of active) {
-    const t = n.service_type || n.type;
-    if (t === 'wireguard' || t === 1) byType.wireguard++;
-    else if (t === 'v2ray' || t === 2) byType.v2ray++;
-    else byType.unknown++;
-  }
-
-  // Average prices
-  let gbTotal = 0, gbCount = 0, hrTotal = 0, hrCount = 0;
-  for (const n of active) {
-    const gb = (n.gigabyte_prices || []).find(p => p.denom === 'udvpn');
-    if (gb?.quote_value) { gbTotal += parseInt(gb.quote_value, 10); gbCount++; }
-    const hr = (n.hourly_prices || []).find(p => p.denom === 'udvpn');
-    if (hr?.quote_value) { hrTotal += parseInt(hr.quote_value, 10); hrCount++; }
-  }
-
-  return {
-    totalNodes: active.length,
-    byCountry,
-    byType,
-    averagePrice: {
-      gigabyteDvpn: gbCount > 0 ? (gbTotal / gbCount) / 1_000_000 : 0,
-      hourlyDvpn: hrCount > 0 ? (hrTotal / hrCount) / 1_000_000 : 0,
-    },
-    nodes: active,
-  };
+  return _getNetworkOverview(lcdUrl);
 }
 
 /**
@@ -584,9 +548,7 @@ export async function getNetworkOverview(lcdUrl) {
  * Returns sorted array of plan IDs that have at least 1 subscription.
  */
 export async function discoverPlanIds(lcdUrl, maxId = 500) {
-  // Delegates to discoverPlans and extracts just the IDs
-  const plans = await discoverPlans(lcdUrl, { maxId });
-  return plans.map(p => p.id);
+  return _discoverPlanIds(lcdUrl, maxId);
 }
 
 /**
@@ -606,29 +568,7 @@ export async function discoverPlanIds(lcdUrl, maxId = 500) {
  *   // needed by encodeMsgStartSession's max_price field.
  */
 export async function getNodePrices(nodeAddress, lcdUrl) {
-  if (typeof nodeAddress !== 'string' || !/^sentnode1[a-z0-9]{38}$/.test(nodeAddress)) {
-    throw new ValidationError(ErrorCodes.INVALID_NODE_ADDRESS, 'nodeAddress must be a valid sentnode1... bech32 address (46 characters)', { value: nodeAddress });
-  }
-
-  // Reuse queryNode() instead of duplicating pagination
-  const node = await queryNode(nodeAddress, { lcdUrl });
-
-  function extractPrice(priceArray) {
-    if (!Array.isArray(priceArray)) return { dvpn: 0, udvpn: 0, raw: null };
-    const entry = priceArray.find(p => p.denom === 'udvpn');
-    if (!entry) return { dvpn: 0, udvpn: 0, raw: null };
-    // Defensive fallback chain: quote_value (V3 current) → base_value → amount (legacy)
-    const rawVal = entry.quote_value || entry.base_value || entry.amount || '0';
-    const udvpn = parseInt(rawVal, 10) || 0;
-    return { dvpn: parseFloat((udvpn / 1_000_000).toFixed(6)), udvpn, raw: entry };
-  }
-
-  return {
-    gigabyte: extractPrice(node.gigabyte_prices),
-    hourly: extractPrice(node.hourly_prices),
-    denom: 'P2P',
-    nodeAddress,
-  };
+  return _getNodePrices(nodeAddress, lcdUrl);
 }
 
 // ─── Display & Serialization Helpers ────────────────────────────────────────
@@ -861,8 +801,7 @@ export function buildRevokeFeeGrantMsg(granter, grantee) {
  * @returns {Promise<Array>} Array of allowance objects
  */
 export async function queryFeeGrants(lcdUrl, grantee) {
-  const { items } = await lcdPaginatedSafe(lcdUrl, `/cosmos/feegrant/v1beta1/allowances/${grantee}`, 'allowances');
-  return items;
+  return _queryFeeGrants(lcdUrl, grantee);
 }
 
 /**
@@ -872,8 +811,7 @@ export async function queryFeeGrants(lcdUrl, grantee) {
  * @returns {Promise<Array>}
  */
 export async function queryFeeGrantsIssued(lcdUrl, granter) {
-  const { items } = await lcdPaginatedSafe(lcdUrl, `/cosmos/feegrant/v1beta1/issued/${granter}`, 'allowances');
-  return items;
+  return _queryFeeGrantsIssued(lcdUrl, granter);
 }
 
 /**
@@ -881,10 +819,7 @@ export async function queryFeeGrantsIssued(lcdUrl, granter) {
  * @returns {Promise<object|null>} Allowance object or null
  */
 export async function queryFeeGrant(lcdUrl, granter, grantee) {
-  try {
-    const data = await lcd(lcdUrl, `/cosmos/feegrant/v1beta1/allowance/${granter}/${grantee}`);
-    return data.allowance || null;
-  } catch { return null; } // 404 = no grant
+  return _queryFeeGrant(lcdUrl, granter, grantee);
 }
 
 /**
@@ -995,8 +930,7 @@ export function encodeForExec(msgs) {
  * @returns {Promise<Array>} Array of grant objects
  */
 export async function queryAuthzGrants(lcdUrl, granter, grantee) {
-  const { items } = await lcdPaginatedSafe(lcdUrl, `/cosmos/authz/v1beta1/grants?granter=${granter}&grantee=${grantee}`, 'grants');
-  return items;
+  return _queryAuthzGrants(lcdUrl, granter, grantee);
 }
 
 // ─── LCD Query Helpers (v25b) ────────────────────────────────────────────────
@@ -1096,20 +1030,7 @@ export async function lcdQueryAll(basePath, opts = {}) {
  * @returns {Promise<{ subscribers: Array<{ address: string, status: number, id: string }>, total: number|null }>}
  */
 export async function queryPlanSubscribers(planId, opts = {}) {
-  const { items, total } = await lcdQueryAll(
-    `/sentinel/subscription/v3/plans/${planId}/subscriptions`,
-    { lcdUrl: opts.lcdUrl, dataKey: 'subscriptions' },
-  );
-  let subscribers = items.map(s => ({
-    address: s.address || s.subscriber,
-    status: s.status,
-    id: s.id || s.base_id,
-    ...s,
-  }));
-  if (opts.excludeAddress) {
-    subscribers = subscribers.filter(s => s.address !== opts.excludeAddress);
-  }
-  return { subscribers, total };
+  return _queryPlanSubscribers(planId, opts);
 }
 
 /**
@@ -1122,14 +1043,7 @@ export async function queryPlanSubscribers(planId, opts = {}) {
  * @returns {Promise<{ subscriberCount: number, totalOnChain: number, ownerSubscribed: boolean }>}
  */
 export async function getPlanStats(planId, ownerAddress, opts = {}) {
-  const { subscribers, total } = await queryPlanSubscribers(planId, { lcdUrl: opts.lcdUrl });
-  const ownerSubscribed = subscribers.some(s => s.address === ownerAddress);
-  const filtered = subscribers.filter(s => s.address !== ownerAddress);
-  return {
-    subscriberCount: filtered.length,
-    totalOnChain: total,
-    ownerSubscribed,
-  };
+  return _getPlanStats(planId, ownerAddress, opts);
 }
 
 // ─── Fee Grant Workflow Helpers (v25b) ────────────────────────────────────────
@@ -1146,39 +1060,7 @@ export async function getPlanStats(planId, ownerAddress, opts = {}) {
  * @returns {Promise<{ msgs: Array, skipped: string[], newGrants: string[] }>} Messages ready for broadcast
  */
 export async function grantPlanSubscribers(planId, opts = {}) {
-  const { granterAddress, lcdUrl, grantOpts = {} } = opts;
-  if (!granterAddress) throw new ValidationError(ErrorCodes.INVALID_OPTIONS, 'granterAddress is required');
-
-  // Get subscribers
-  const { subscribers } = await queryPlanSubscribers(planId, { lcdUrl });
-
-  // Get existing grants ISSUED BY granter (not grants received)
-  const existingGrants = await queryFeeGrantsIssued(lcdUrl || LCD_ENDPOINTS[0].url, granterAddress);
-  const alreadyGranted = new Set(existingGrants.map(g => g.grantee));
-
-  const msgs = [];
-  const skipped = [];
-  const newGrants = [];
-
-  const now = new Date();
-  // Deduplicate by address and filter active+non-expired
-  const seen = new Set();
-  for (const sub of subscribers) {
-    const addr = sub.acc_address || sub.address;
-    if (!addr || seen.has(addr)) continue;
-    seen.add(addr);
-    // Skip self-grant (chain rejects granter === grantee)
-    if (addr === granterAddress || isSameKey(addr, granterAddress)) { skipped.push(addr); continue; }
-    // Skip inactive or expired
-    if (sub.status && sub.status !== 'active') { skipped.push(addr); continue; }
-    if (sub.inactive_at && new Date(sub.inactive_at) <= now) { skipped.push(addr); continue; }
-    // Skip already granted
-    if (alreadyGranted.has(addr)) { skipped.push(addr); continue; }
-    msgs.push(buildFeeGrantMsg(granterAddress, addr, grantOpts));
-    newGrants.push(addr);
-  }
-
-  return { msgs, skipped, newGrants };
+  return _grantPlanSubscribers(planId, opts);
 }
 
 /**
@@ -1191,34 +1073,7 @@ export async function grantPlanSubscribers(planId, opts = {}) {
  * @returns {Promise<Array<{ granter: string, grantee: string, expiresAt: Date|null, daysLeft: number|null }>>}
  */
 export async function getExpiringGrants(lcdUrl, granteeOrGranter, withinDays = 7, role = 'grantee') {
-  const grants = role === 'grantee'
-    ? await queryFeeGrants(lcdUrl, granteeOrGranter)
-    : await queryFeeGrantsIssued(lcdUrl, granteeOrGranter);
-
-  const now = Date.now();
-  const cutoff = now + withinDays * 24 * 60 * 60_000;
-  const expiring = [];
-
-  for (const g of grants) {
-    // Fee grant allowances have complex nested @type structures:
-    // BasicAllowance: { expiration }
-    // PeriodicAllowance: { basic: { expiration } }
-    // AllowedMsgAllowance: { allowance: { expiration } or allowance: { basic: { expiration } } }
-    const a = g.allowance || {};
-    const inner = a.allowance || a; // unwrap AllowedMsgAllowance
-    const expStr = inner.expiration || inner.basic?.expiration || a.expiration || a.basic?.expiration;
-    if (!expStr) continue; // no expiry set
-    const expiresAt = new Date(expStr);
-    if (expiresAt.getTime() <= cutoff) {
-      expiring.push({
-        granter: g.granter,
-        grantee: g.grantee,
-        expiresAt,
-        daysLeft: Math.max(0, Math.round((expiresAt.getTime() - now) / (24 * 60 * 60_000))),
-      });
-    }
-  }
-  return expiring;
+  return _getExpiringGrants(lcdUrl, granteeOrGranter, withinDays, role);
 }
 
 /**
@@ -1231,18 +1086,7 @@ export async function getExpiringGrants(lcdUrl, granteeOrGranter, withinDays = 7
  * @returns {Promise<{ msgs: Array, renewed: string[] }>} Messages ready for broadcast
  */
 export async function renewExpiringGrants(lcdUrl, granterAddress, withinDays = 7, grantOpts = {}) {
-  const expiring = await getExpiringGrants(lcdUrl, granterAddress, withinDays, 'granter');
-  const msgs = [];
-  const renewed = [];
-
-  for (const g of expiring) {
-    if (g.grantee === granterAddress) continue; // skip self
-    msgs.push(buildRevokeFeeGrantMsg(granterAddress, g.grantee));
-    msgs.push(buildFeeGrantMsg(granterAddress, g.grantee, grantOpts));
-    renewed.push(g.grantee);
-  }
-
-  return { msgs, renewed };
+  return _renewExpiringGrants(lcdUrl, granterAddress, withinDays, grantOpts);
 }
 
 // ─── Fee Grant Monitoring (v25b) ─────────────────────────────────────────────
@@ -1260,46 +1104,7 @@ export async function renewExpiringGrants(lcdUrl, granterAddress, withinDays = 7
  * @returns {EventEmitter} Emits 'expiring' and 'expired' events. Call .stop() to stop monitoring.
  */
 export function monitorFeeGrants(opts = {}) {
-  const { lcdUrl, address, checkIntervalMs = 6 * 60 * 60_000, warnDays = 7, autoRenew = false, grantOpts = {} } = opts;
-  if (!lcdUrl || !address) throw new ValidationError(ErrorCodes.INVALID_OPTIONS, 'monitorFeeGrants requires lcdUrl and address');
-
-  const emitter = new EventEmitter();
-  let timer = null;
-
-  const check = async () => {
-    try {
-      const expiring = await getExpiringGrants(lcdUrl, address, warnDays, 'granter');
-      const now = Date.now();
-
-      for (const g of expiring) {
-        if (g.expiresAt.getTime() <= now) {
-          emitter.emit('expired', g);
-        } else {
-          emitter.emit('expiring', g);
-        }
-      }
-
-      if (autoRenew && expiring.length > 0) {
-        const { msgs, renewed } = await renewExpiringGrants(lcdUrl, address, warnDays, grantOpts);
-        if (msgs.length > 0) {
-          emitter.emit('renew', { msgs, renewed });
-        }
-      }
-    } catch (err) {
-      emitter.emit('error', err);
-    }
-  };
-
-  // Start checking
-  check();
-  timer = setInterval(check, checkIntervalMs);
-  if (timer.unref) timer.unref(); // Don't prevent process exit
-
-  emitter.stop = () => {
-    if (timer) { clearInterval(timer); timer = null; }
-  };
-
-  return emitter;
+  return _monitorFeeGrants(opts);
 }
 
 // ─── Query Helpers (v25c) ────────────────────────────────────────────────────
@@ -1311,10 +1116,7 @@ export function monitorFeeGrants(opts = {}) {
  * @returns {Promise<{ subscriptions: any[], total: number|null }>}
  */
 export async function querySubscriptions(lcdUrl, walletAddr, opts = {}) {
-  // v26: Correct LCD endpoint for wallet subscriptions
-  let path = `/sentinel/subscription/v3/accounts/${walletAddr}/subscriptions`;
-  if (opts.status) path += `?status=${opts.status === 'active' ? '1' : '2'}`;
-  return lcdQueryAll(path, { lcdUrl, dataKey: 'subscriptions' });
+  return _querySubscriptions(lcdUrl, walletAddr, opts);
 }
 
 /**
@@ -1324,20 +1126,7 @@ export async function querySubscriptions(lcdUrl, walletAddr, opts = {}) {
  * @returns {Promise<{ maxBytes: number, usedBytes: number, remainingBytes: number, percentUsed: number }|null>}
  */
 export async function querySessionAllocation(lcdUrl, sessionId) {
-  try {
-    const data = await lcd(lcdUrl, `/sentinel/session/v3/sessions/${sessionId}`);
-    const s = data.session?.base_session || data.session || {};
-    const maxBytes = parseInt(s.max_bytes || '0', 10);
-    const dl = parseInt(s.download_bytes || '0', 10);
-    const ul = parseInt(s.upload_bytes || '0', 10);
-    const usedBytes = dl + ul;
-    return {
-      maxBytes,
-      usedBytes,
-      remainingBytes: Math.max(0, maxBytes - usedBytes),
-      percentUsed: maxBytes > 0 ? Math.round((usedBytes / maxBytes) * 100) : 0,
-    };
-  } catch { return null; }
+  return _querySessionAllocation(lcdUrl, sessionId);
 }
 
 /**
@@ -1350,28 +1139,7 @@ export async function querySessionAllocation(lcdUrl, sessionId) {
  * @returns {Promise<object>} Node object with remote_url resolved
  */
 export async function queryNode(nodeAddress, opts = {}) {
-  if (typeof nodeAddress !== 'string' || !nodeAddress.startsWith('sentnode1')) {
-    throw new ValidationError(ErrorCodes.INVALID_NODE_ADDRESS, 'nodeAddress must be sentnode1...', { nodeAddress });
-  }
-
-  const fetchDirect = async (baseUrl) => {
-    try {
-      const data = await lcdQuery(`/sentinel/node/v3/nodes/${nodeAddress}`, { lcdUrl: baseUrl });
-      if (data?.node) {
-        data.node.remote_url = resolveNodeUrl(data.node);
-        return data.node;
-      }
-    } catch { /* fall through to full list */ }
-    const { items } = await lcdPaginatedSafe(baseUrl, '/sentinel/node/v3/nodes?status=1', 'nodes');
-    const found = items.find(n => n.address === nodeAddress);
-    if (!found) throw new NodeError(ErrorCodes.NODE_NOT_FOUND, `Node ${nodeAddress} not found on LCD (may be inactive)`, { nodeAddress });
-    found.remote_url = resolveNodeUrl(found);
-    return found;
-  };
-
-  if (opts.lcdUrl) return fetchDirect(opts.lcdUrl);
-  const { result } = await tryWithFallback(LCD_ENDPOINTS, fetchDirect, `LCD node lookup ${nodeAddress}`);
-  return result;
+  return _queryNode(nodeAddress, opts);
 }
 
 /**
@@ -1467,12 +1235,7 @@ export async function lcdPaginatedSafe(lcdUrl, path, itemsKey, opts = {}) {
  * @returns {Promise<{ items: ChainSession[], total: number }>}
  */
 export async function querySessions(address, lcdUrl, opts = {}) {
-  let path = `/sentinel/session/v3/sessions?address=${address}`;
-  if (opts.status) path += `&status=${opts.status}`;
-  const result = await lcdPaginatedSafe(lcdUrl, path, 'sessions');
-  // Auto-flatten base_session nesting so devs don't hit session.id === undefined
-  result.items = result.items.map(flattenSession);
-  return result;
+  return _querySessions(address, lcdUrl, opts);
 }
 
 /**
@@ -1484,27 +1247,7 @@ export async function querySessions(address, lcdUrl, opts = {}) {
  * @returns {object} Flattened session with all fields at top level
  */
 export function flattenSession(session) {
-  if (!session) return session;
-  const bs = session.base_session || {};
-  return {
-    id: bs.id || session.id,
-    acc_address: bs.acc_address || session.acc_address,
-    node_address: bs.node_address || bs.node || session.node_address,
-    download_bytes: bs.download_bytes || session.download_bytes || '0',
-    upload_bytes: bs.upload_bytes || session.upload_bytes || '0',
-    max_bytes: bs.max_bytes || session.max_bytes || '0',
-    duration: bs.duration || session.duration,
-    max_duration: bs.max_duration || session.max_duration,
-    status: bs.status || session.status,
-    start_at: bs.start_at || session.start_at,
-    status_at: bs.status_at || session.status_at,
-    inactive_at: bs.inactive_at || session.inactive_at,
-    // Preserve type-specific fields
-    price: session.price || undefined,
-    subscription_id: session.subscription_id || undefined,
-    '@type': session['@type'] || undefined,
-    _raw: session, // original for advanced use
-  };
+  return _flattenSession(session);
 }
 
 /**
@@ -1514,10 +1257,7 @@ export function flattenSession(session) {
  * @returns {Promise<Subscription|null>}
  */
 export async function querySubscription(id, lcdUrl) {
-  try {
-    const data = await lcdQuery(`/sentinel/subscription/v3/subscriptions/${id}`, { lcdUrl });
-    return data.subscription || null;
-  } catch { return null; }
+  return _querySubscription(id, lcdUrl);
 }
 
 /**
@@ -1528,10 +1268,7 @@ export async function querySubscription(id, lcdUrl) {
  * @returns {Promise<{ has: boolean, subscription?: object }>}
  */
 export async function hasActiveSubscription(address, planId, lcdUrl) {
-  const { items } = await querySubscriptions(lcdUrl, address, { status: 'active' });
-  const match = items.find(s => String(s.plan_id) === String(planId));
-  if (match) return { has: true, subscription: match };
-  return { has: false };
+  return _hasActiveSubscription(address, planId, lcdUrl);
 }
 
 // ─── v26c: Display Helpers ───────────────────────────────────────────────────
@@ -1572,15 +1309,7 @@ export function parseChainDuration(durationStr) {
  * @returns {Promise<{ items: any[], total: number|null }>}
  */
 export async function queryPlanNodes(planId, lcdUrl) {
-  // LCD pagination is BROKEN on this endpoint — count_total returns min(actual, limit)
-  // and next_key is always null. Single high-limit request gets all nodes.
-  const doQuery = async (baseUrl) => {
-    const data = await lcd(baseUrl, `/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=5000`);
-    return { items: data.nodes || [], total: (data.nodes || []).length };
-  };
-  if (lcdUrl) return doQuery(lcdUrl);
-  const { result } = await tryWithFallback(LCD_ENDPOINTS, doQuery, `LCD plan ${planId} nodes`);
-  return result;
+  return _queryPlanNodes(planId, lcdUrl);
 }
 
 /**
@@ -1595,33 +1324,7 @@ export async function queryPlanNodes(planId, lcdUrl) {
  * @returns {Promise<Array<{ id: number, subscribers: number, nodeCount: number, price: object|null, hasNodes: boolean }>>}
  */
 export async function discoverPlans(lcdUrl, opts = {}) {
-  const maxId = opts.maxId || 500;
-  const batchSize = opts.batchSize || 15;
-  const includeEmpty = opts.includeEmpty || false;
-  const baseLcd = lcdUrl || LCD_ENDPOINTS[0].url;
-  const plans = [];
-
-  for (let batch = 0; batch < Math.ceil(maxId / batchSize); batch++) {
-    const probes = [];
-    for (let i = batch * batchSize + 1; i <= Math.min((batch + 1) * batchSize, maxId); i++) {
-      probes.push((async (id) => {
-        try {
-          const subData = await lcd(baseLcd, `/sentinel/subscription/v3/plans/${id}/subscriptions?pagination.limit=1&pagination.count_total=true`);
-          const subCount = parseInt(subData.pagination?.total || '0', 10);
-          if (subCount === 0 && !includeEmpty) return null;
-          // Plan nodes endpoint has broken pagination (count_total wrong, next_key null).
-          // Use limit=5000 single request and count the actual array.
-          const nodeData = await lcd(baseLcd, `/sentinel/node/v3/plans/${id}/nodes?pagination.limit=5000`);
-          const nodeCount = (nodeData.nodes || []).length;
-          const price = subData.subscriptions?.[0]?.price || null;
-          return { id, subscribers: subCount, nodeCount, price, hasNodes: nodeCount > 0 };
-        } catch { return null; }
-      })(i));
-    }
-    const results = await Promise.all(probes);
-    for (const r of results) if (r) plans.push(r);
-  }
-  return plans.sort((a, b) => a.id - b.id);
+  return _discoverPlans(lcdUrl, opts);
 }
 
 /**
@@ -1709,10 +1412,7 @@ export async function subscribeToPlan(client, fromAddress, planId, denom = 'udvp
  * @returns {Promise<object|null>}
  */
 export async function getProviderByAddress(provAddress, opts = {}) {
-  try {
-    const data = await lcdQuery(`/sentinel/provider/v2/providers/${provAddress}`, opts);
-    return data.provider || null;
-  } catch { return null; }
+  return _getProviderByAddress(provAddress, opts);
 }
 
 /**
@@ -1904,7 +1604,6 @@ export const MSG_TYPES = {
 // v27: Persistent user settings (backported from C# VpnSettings.cs).
 // Stores preferences in ~/.sentinel-sdk/settings.json with restrictive permissions.
 
-const SETTINGS_FILE = path.join(os.homedir(), '.sentinel-sdk', 'settings.json');
 
 /**
  * Load persisted VPN settings from disk.
@@ -1912,10 +1611,7 @@ const SETTINGS_FILE = path.join(os.homedir(), '.sentinel-sdk', 'settings.json');
  * @returns {Record<string, any>}
  */
 export function loadVpnSettings() {
-  try {
-    if (!existsSync(SETTINGS_FILE)) return {};
-    return JSON.parse(readFileSync(SETTINGS_FILE, 'utf-8'));
-  } catch { return {}; }
+  return _loadVpnSettings();
 }
 
 /**
@@ -1923,7 +1619,5 @@ export function loadVpnSettings() {
  * @param {Record<string, any>} settings
  */
 export function saveVpnSettings(settings) {
-  const dir = path.dirname(SETTINGS_FILE);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), { mode: 0o600 });
+  return _saveVpnSettings(settings);
 }

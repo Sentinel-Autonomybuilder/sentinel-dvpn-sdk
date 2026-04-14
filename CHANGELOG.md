@@ -2,6 +2,40 @@
 
 Every fix made during SDK creation, why it matters, and what happens if you use upstream Sentinel code directly without these fixes.
 
+## v2.3.0 — RPC-First Migration (2026-04-14)
+
+**100% of chain queries now use RPC-first with LCD fallback.** Protobuf/ABCI queries via Tendermint37Client are ~912x faster than LCD REST. If RPC fails, every query automatically falls back to LCD.
+
+### JS SDK Changes
+- **chain/rpc.js**: Added 4 new RPC functions — `rpcQueryFeeGrants`, `rpcQueryFeeGrantsIssued`, `rpcQueryAuthzGrants`, `rpcQueryProvider`
+- **chain/queries.js**: All 22 query functions are RPC-first with LCD fallback
+- **chain/fee-grants.js**: All 7 functions are RPC-first with LCD fallback
+- **cosmjs-setup.js**: All 28 query bodies replaced with thin wrappers delegating to RPC-first modules
+- **session-manager.js**: `buildSessionMap()` now uses RPC-first `querySessions()`
+- **batch.js**: `waitForBatchSessions()` now uses RPC-first `querySessions()`
+- **defaults.js**: Added runtime endpoint management — `addRpcEndpoint`, `removeRpcEndpoint`, `setEndpoints`, `getEndpoints`, `checkRpcEndpointHealth`, `optimizeEndpoints`
+- **index.js**: 16 RPC query exports + 8 endpoint management exports
+- **SDK_VERSION**: Bumped to 2.3.0
+
+### C# SDK Changes
+- **RpcClient.cs**: Wired into ChainClient. 17 typed query methods (sessions, subscriptions, nodes, balance, provider, fee grants, authz, allocations)
+- **ProtobufReader.cs**: Added `DecodeSession`, `DecodeSubscription`, `DecodeProvider` decoders
+- **ChainClient.Queries.cs**: 13 methods upgraded to RPC-first with LCD fallback
+- **ChainClient.FeeGrants.cs**: 2 methods upgraded to RPC-first with LCD fallback
+- **Total**: 15 direct + 9 transitive = 24 query methods are RPC-first
+
+### Coverage
+| Module | RPC-First | Total |
+|--------|-----------|-------|
+| JS chain/queries.js | 22/22 | 100% |
+| JS chain/fee-grants.js | 7/7 | 100% |
+| JS session-manager.js | 1/1 | 100% |
+| JS batch.js | 1/1 | 100% |
+| C# ChainClient.Queries | 13/13 | 100% |
+| C# ChainClient.FeeGrants | 2/2 | 100% |
+
+---
+
 ## Documentation Versions
 
 | Version | Date | Changes |

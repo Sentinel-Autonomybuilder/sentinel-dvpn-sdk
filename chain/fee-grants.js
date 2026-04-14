@@ -16,6 +16,12 @@ import { ValidationError, ErrorCodes } from '../errors.js';
 import { lcd, lcdPaginatedSafe, lcdQueryAll } from './lcd.js';
 import { isSameKey } from './wallet.js';
 import { queryPlanSubscribers } from './queries.js';
+import {
+  createRpcQueryClientWithFallback,
+  rpcQueryFeeGrant as _rpcQueryFeeGrant,
+  rpcQueryFeeGrants as _rpcQueryFeeGrants,
+  rpcQueryFeeGrantsIssued as _rpcQueryFeeGrantsIssued,
+} from './rpc.js';
 
 // ─── Protobuf Helpers for FeeGrant ──────────────────────────────────────────
 // Uses the same manual protobuf encoding as Sentinel types — no codegen needed.
@@ -58,6 +64,21 @@ function encodeAny(typeUrl, valueBytes) {
     protoString(1, typeUrl),
     protoEmbedded(2, valueBytes),
   ]);
+}
+
+// ─── RPC Client Helper ─────────────────────────────────────────────────────
+
+let _rpcClient = null;
+let _rpcClientPromise = null;
+
+async function getRpcClient() {
+  if (_rpcClient) return _rpcClient;
+  if (_rpcClientPromise) return _rpcClientPromise;
+  _rpcClientPromise = createRpcQueryClientWithFallback()
+    .then(client => { _rpcClient = client; return client; })
+    .catch(() => { _rpcClient = null; return null; })
+    .finally(() => { _rpcClientPromise = null; });
+  return _rpcClientPromise;
 }
 
 // ─── FeeGrant (cosmos.feegrant.v1beta1) ─────────────────────────────────────
@@ -105,29 +126,59 @@ export function buildRevokeFeeGrantMsg(granter, grantee) {
 
 /**
  * Query fee grants given to a grantee.
+ * RPC-first with LCD fallback.
  * @returns {Promise<Array>} Array of allowance objects
  */
 export async function queryFeeGrants(lcdUrl, grantee) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      return await _rpcQueryFeeGrants(rpc, grantee);
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
   const { items } = await lcdPaginatedSafe(lcdUrl, `/cosmos/feegrant/v1beta1/allowances/${grantee}`, 'allowances');
   return items;
 }
 
 /**
  * Query fee grants issued BY an address (where addr is the granter).
+ * RPC-first with LCD fallback.
  * @param {string} lcdUrl
  * @param {string} granter - Address that issued the grants
  * @returns {Promise<Array>}
  */
 export async function queryFeeGrantsIssued(lcdUrl, granter) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      return await _rpcQueryFeeGrantsIssued(rpc, granter);
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
   const { items } = await lcdPaginatedSafe(lcdUrl, `/cosmos/feegrant/v1beta1/issued/${granter}`, 'allowances');
   return items;
 }
 
 /**
  * Query a specific fee grant between granter and grantee.
+ * RPC-first with LCD fallback.
  * @returns {Promise<object|null>} Allowance object or null
  */
 export async function queryFeeGrant(lcdUrl, granter, grantee) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      return await _rpcQueryFeeGrant(rpc, granter, grantee);
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
   try {
     const data = await lcd(lcdUrl, `/cosmos/feegrant/v1beta1/allowance/${granter}/${grantee}`);
     return data.allowance || null;
