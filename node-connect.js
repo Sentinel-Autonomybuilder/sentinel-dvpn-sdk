@@ -110,6 +110,7 @@ export class ConnectionState {
     this.connection = null;  // { nodeAddress, serviceType, sessionId, connectedAt, socksPort? }
     this.savedProxyState = null;
     this._mnemonic = null;   // Stored for session-end TX on disconnect (zeroed after use)
+    this._feeGranter = null; // Stored for fee-granted session end on disconnect (0-P2P agents)
     _activeStates.add(this);
   }
   get isConnected() { return !!(this.v2rayProc || this.wgTunnel); }
@@ -713,6 +714,12 @@ export async function tryFastReconnect(opts, state = _defaultState) {
 
   progress(onProgress, logFn, 'cache', `Session ${saved.sessionId} still active — skipping payment and handshake`);
 
+  // Restore fee granter from saved credentials — crash recovery for 0-P2P agents
+  if (saved.feeGranter && state) {
+    state._feeGranter = saved.feeGranter;
+    progress(onProgress, logFn, 'cache', `Restored fee granter: ${saved.feeGranter}`);
+  }
+
   try {
     if (saved.serviceType === 'wireguard') {
       // Validate tunnel requirements
@@ -785,7 +792,7 @@ export async function tryFastReconnect(opts, state = _defaultState) {
           try { await disconnectWireGuard(); } catch {}
           // End session on chain (fire-and-forget)
           if (saved.sessionId && state._mnemonic) {
-            _endSessionOnChain(saved.sessionId, state._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+            _endSessionOnChain(saved.sessionId, state._mnemonic, state._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
           }
           state.wgTunnel = null;
           state.connection = null;
@@ -910,7 +917,7 @@ export async function tryFastReconnect(opts, state = _defaultState) {
           if (state.systemProxy) clearSystemProxy(state);
           // End session on chain (fire-and-forget)
           if (sessionIdStr && state._mnemonic) {
-            _endSessionOnChain(sessionIdStr, state._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+            _endSessionOnChain(sessionIdStr, state._mnemonic, state._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
           }
           state.connection = null;
           state._mnemonic = null;
@@ -1389,8 +1396,21 @@ export async function connectViaSubscription(opts) {
     };
 
     checkAborted(signal);
-    progress(onProgress, logFn, 'session', `Starting session via subscription ${opts.subscriptionId}...`);
-    const result = await broadcastWithInactiveRetry(client, account.address, [msg], logFn, onProgress);
+    const feeGranter = opts.feeGranter || null;
+    progress(onProgress, logFn, 'session', `Starting session via subscription ${opts.subscriptionId}${feeGranter ? ' (fee granted)' : ''}...`);
+
+    let result;
+    if (feeGranter) {
+      try {
+        result = await broadcastWithFeeGrant(client, account.address, [msg], feeGranter);
+      } catch (feeErr) {
+        // Fee grant TX failed (grant expired, revoked, or never existed) — fall back to user-paid
+        progress(onProgress, logFn, 'session', 'Fee grant failed, paying gas from wallet...');
+        result = await broadcastWithInactiveRetry(client, account.address, [msg], logFn, onProgress);
+      }
+    } else {
+      result = await broadcastWithInactiveRetry(client, account.address, [msg], logFn, onProgress);
+    }
     const extracted = extractId(result, /session/i, ['session_id', 'id']);
     if (!extracted) throw new ChainError(ErrorCodes.SESSION_EXTRACT_FAILED, 'Failed to extract session ID from subscription TX result', { txHash: result.transactionHash });
     const sessionId = BigInt(extracted);
@@ -1456,8 +1476,9 @@ async function connectInternal(opts, paymentStrategy, retryStrategy, state = _de
     privKeyFromMnemonic(opts.mnemonic),
   ]);
 
-  // Store mnemonic on state for session-end TX on disconnect (fire-and-forget cleanup)
+  // Store mnemonic + feeGranter on state for session-end TX on disconnect (fire-and-forget cleanup)
   state._mnemonic = opts.mnemonic;
+  state._feeGranter = opts.feeGranter || null;
 
   // 2. RPC connect + LCD lookup in parallel (independent network calls)
   // v21: parallelized — saves 1-3s (was sequential)
@@ -1487,11 +1508,14 @@ async function connectInternal(opts, paymentStrategy, retryStrategy, state = _de
     // Check balance against actual node price + gas (not just 0.1 P2P)
     const nodePriceUdvpn = (nodeInfo.gigabyte_prices || []).find(p => p.denom === 'udvpn');
     const minRequired = nodePriceUdvpn ? parseInt(nodePriceUdvpn.quote_value || '0', 10) + 500000 : 1000000; // price + 0.5 P2P gas
-    if (!opts.dryRun && bal.udvpn < minRequired) {
+    if (!opts.dryRun && !opts.feeGranter && bal.udvpn < minRequired) {
       throw new ChainError(ErrorCodes.INSUFFICIENT_BALANCE,
         `Wallet has ${bal.dvpn.toFixed(2)} P2P — need at least ${(minRequired / 1e6).toFixed(2)} P2P (node price + gas) for a session. Fund address ${account.address} with P2P tokens.`,
         { balance: bal, address: account.address, required: minRequired }
       );
+    }
+    if (opts.feeGranter && bal.udvpn < minRequired) {
+      progress(onProgress, logFn, 'wallet', `Balance below minimum but fee granter ${opts.feeGranter} covers gas`);
     }
   } catch (balErr) {
     if (balErr.code === ErrorCodes.INSUFFICIENT_BALANCE) throw balErr;
@@ -1818,6 +1842,7 @@ async function setupWireGuard({ remoteUrl, sessionId, privKey, fullTunnel, split
     wgServerPubKey: hs.serverPubKey,
     wgAssignedAddrs: hs.assignedAddrs,
     wgServerEndpoint: hs.serverEndpoint,
+    ...(state._feeGranter ? { feeGranter: state._feeGranter } : {}),
   });
 
   // Enable kill switch if opts.killSwitch is true
@@ -1841,7 +1866,7 @@ async function setupWireGuard({ remoteUrl, sessionId, privKey, fullTunnel, split
       try { await disconnectWireGuard(); } catch {} // tunnel may already be down
       // End session on chain (fire-and-forget)
       if (sessionIdStr && state._mnemonic) {
-        _endSessionOnChain(sessionIdStr, state._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+        _endSessionOnChain(sessionIdStr, state._mnemonic, state._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
       }
       state.wgTunnel = null;
       state.connection = null;
@@ -2075,6 +2100,7 @@ async function setupV2Ray({ remoteUrl, serverHost, sessionId, privKey, v2rayExeP
     serviceType: 'v2ray',
     v2rayUuid: uuid,
     v2rayConfig: hs.config,
+    ...(state._feeGranter ? { feeGranter: state._feeGranter } : {}),
   });
 
   // Auto-set Windows system proxy so browser traffic goes through the SOCKS5 tunnel.
@@ -2104,7 +2130,7 @@ async function setupV2Ray({ remoteUrl, serverHost, sessionId, privKey, v2rayExeP
       if (state.systemProxy) clearSystemProxy();
       // End session on chain (fire-and-forget)
       if (sessionIdStr && state._mnemonic) {
-        _endSessionOnChain(sessionIdStr, state._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+        _endSessionOnChain(sessionIdStr, state._mnemonic, state._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
       }
       state.connection = null;
       state._mnemonic = null;
@@ -2139,7 +2165,7 @@ export function getStatus() {
     _defaultState.connection = null;
     // End session on chain (fire-and-forget) to prevent stale session leaks
     if (stale?.sessionId && _defaultState._mnemonic) {
-      _endSessionOnChain(stale.sessionId, _defaultState._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+      _endSessionOnChain(stale.sessionId, _defaultState._mnemonic, _defaultState._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
     }
     clearState();
     events.emit('disconnected', { nodeAddress: stale.nodeAddress, serviceType: stale.serviceType, reason: 'phantom_state' });
@@ -2186,7 +2212,7 @@ export function getStatus() {
   if (!healthChecks.tunnelActive && !_defaultState.v2rayProc && !_defaultState.wgTunnel) {
     // Both tunnel handles are null — connection state is stale
     if (conn?.sessionId && _defaultState._mnemonic) {
-      _endSessionOnChain(conn.sessionId, _defaultState._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+      _endSessionOnChain(conn.sessionId, _defaultState._mnemonic, _defaultState._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
     }
     _defaultState.connection = null;
     clearState();
@@ -2195,7 +2221,7 @@ export function getStatus() {
   if (_defaultState.wgTunnel && !healthChecks.tunnelActive) {
     // WireGuard state says connected but tunnel is dead — auto-cleanup
     if (conn?.sessionId && _defaultState._mnemonic) {
-      _endSessionOnChain(conn.sessionId, _defaultState._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+      _endSessionOnChain(conn.sessionId, _defaultState._mnemonic, _defaultState._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
     }
     _defaultState.wgTunnel = null;
     _defaultState.connection = null;
@@ -2206,7 +2232,7 @@ export function getStatus() {
   if (_defaultState.v2rayProc && !healthChecks.tunnelActive) {
     // V2Ray process died — auto-cleanup
     if (conn?.sessionId && _defaultState._mnemonic) {
-      _endSessionOnChain(conn.sessionId, _defaultState._mnemonic).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
+      _endSessionOnChain(conn.sessionId, _defaultState._mnemonic, _defaultState._feeGranter).then(r => events.emit('sessionEnded', { txHash: r?.transactionHash })).catch(e => events.emit('sessionEndFailed', { error: e.message }));
     }
     _defaultState.v2rayProc = null;
     _defaultState.connection = null;
@@ -2268,13 +2294,14 @@ export async function disconnectState(state) {
 
     // End session on chain (best-effort, fire-and-forget — never blocks disconnect)
     if (prev?.sessionId && state._mnemonic) {
-      _endSessionOnChain(prev.sessionId, state._mnemonic).catch(e => {
+      _endSessionOnChain(prev.sessionId, state._mnemonic, state._feeGranter).catch(e => {
         console.warn(`[sentinel-sdk] Failed to end session ${prev.sessionId} on chain: ${e.message}`);
       });
     }
   } finally {
     // ALWAYS clear connection state — even if teardown threw
     state._mnemonic = null;
+    state._feeGranter = null;
     state.connection = null;
     clearState();
     clearWalletCache(); // v34: Clear cached wallet objects (private keys) from memory
@@ -2296,7 +2323,7 @@ export async function disconnect() {
  * @param {string} mnemonic - BIP39 mnemonic for signing the TX
  * @private
  */
-async function _endSessionOnChain(sessionId, mnemonic) {
+async function _endSessionOnChain(sessionId, mnemonic, feeGranter = null) {
   const { wallet, account } = await cachedCreateWallet(mnemonic);
   const client = await tryWithFallback(
     RPC_ENDPOINTS,
@@ -2304,8 +2331,22 @@ async function _endSessionOnChain(sessionId, mnemonic) {
     'RPC connect (session end)',
   ).then(r => r.result);
   const msg = buildEndSessionMsg(account.address, sessionId);
-  const fee = { amount: [{ denom: 'udvpn', amount: '20000' }], gas: '200000' };
-  const result = await client.signAndBroadcast(account.address, [msg], fee);
+
+  // Use fee grant for session end when available (0-P2P agents can't pay gas)
+  let result;
+  if (feeGranter) {
+    try {
+      result = await broadcastWithFeeGrant(client, account.address, [msg], feeGranter);
+    } catch (feeErr) {
+      // Fee grant failed (expired/revoked) — try with own gas as fallback
+      const fee = { amount: [{ denom: 'udvpn', amount: '20000' }], gas: '200000' };
+      result = await client.signAndBroadcast(account.address, [msg], fee);
+    }
+  } else {
+    const fee = { amount: [{ denom: 'udvpn', amount: '20000' }], gas: '200000' };
+    result = await client.signAndBroadcast(account.address, [msg], fee);
+  }
+
   if (result.code !== 0) {
     console.warn(`[sentinel-sdk] End session TX failed (code ${result.code}): ${result.rawLog}`);
   } else {

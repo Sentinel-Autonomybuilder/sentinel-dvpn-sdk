@@ -298,10 +298,15 @@ export {
   rpcQueryNodes,
   rpcQueryNode,
   rpcQueryNodesForPlan,
+  rpcQuerySession,
   rpcQuerySessionsForAccount,
+  rpcQuerySubscription,
   rpcQuerySubscriptionsForAccount,
+  rpcQuerySubscriptionsForPlan,
+  rpcQuerySubscriptionAllocations,
   rpcQueryPlan,
   rpcQueryBalance,
+  rpcQueryFeeGrant,
 } from './chain/rpc.js';
 
 // ─── Subscription Sharing (plan operator → user onboarding) ────────────────

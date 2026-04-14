@@ -234,7 +234,7 @@ function decodeRepeatedMessages(fieldEntries) {
   return fieldEntries.map(entry => decodeProto(entry.value));
 }
 
-// ─── Node Decoder ───────────────────────────────────────────────────────────
+// ─── Shared Decoders ────────────────────────────────────────────────────────
 
 function decodePrice(fields) {
   return {
@@ -244,6 +244,30 @@ function decodePrice(fields) {
   };
 }
 
+/**
+ * Decode a google.protobuf.Timestamp (field 1=seconds, field 2=nanos) → ISO string.
+ */
+function decodeTimestamp(bytes) {
+  if (!bytes || bytes.length === 0) return null;
+  const f = decodeProto(bytes);
+  const seconds = f[1]?.[0] ? Number(f[1][0].value) : 0;
+  const nanos = f[2]?.[0] ? Number(f[2][0].value) : 0;
+  return new Date(seconds * 1000 + nanos / 1_000_000).toISOString();
+}
+
+/**
+ * Decode a google.protobuf.Duration (field 1=seconds, field 2=nanos) → "Xs" string (chain format).
+ */
+function decodeDuration(bytes) {
+  if (!bytes || bytes.length === 0) return '0s';
+  const f = decodeProto(bytes);
+  const seconds = f[1]?.[0] ? Number(f[1][0].value) : 0;
+  const nanos = f[2]?.[0] ? Number(f[2][0].value) : 0;
+  return `${seconds + nanos / 1_000_000_000}s`;
+}
+
+// ─── Node Decoder ───────────────────────────────────────────────────────────
+
 function decodeNode(fields) {
   return {
     address: fields[1]?.[0] ? decodeString(fields[1][0].value) : '',
@@ -251,6 +275,125 @@ function decodeNode(fields) {
     hourly_prices: (fields[3] || []).map(f => decodePrice(decodeProto(f.value))),
     remote_addrs: (fields[4] || []).map(f => decodeString(f.value)),
     status: fields[6]?.[0] ? Number(fields[6][0].value) : 0,
+  };
+}
+
+// ─── Session Decoder ────────────────────────────────────────────────────────
+
+/**
+ * Decode BaseSession proto fields (sentinel.session.v3.BaseSession).
+ * Proto field numbers: 1=id, 2=acc_address, 3=node_address, 4=download_bytes,
+ * 5=upload_bytes, 6=max_bytes, 7=duration, 8=max_duration, 9=status,
+ * 10=inactive_at, 11=start_at, 12=status_at
+ */
+function decodeBaseSession(fields) {
+  return {
+    id: fields[1]?.[0] ? String(fields[1][0].value) : '0',
+    acc_address: fields[2]?.[0] ? decodeString(fields[2][0].value) : '',
+    node_address: fields[3]?.[0] ? decodeString(fields[3][0].value) : '',
+    download_bytes: fields[4]?.[0] ? decodeString(fields[4][0].value) : '0',
+    upload_bytes: fields[5]?.[0] ? decodeString(fields[5][0].value) : '0',
+    max_bytes: fields[6]?.[0] ? decodeString(fields[6][0].value) : '0',
+    duration: fields[7]?.[0] ? decodeDuration(fields[7][0].value) : '0s',
+    max_duration: fields[8]?.[0] ? decodeDuration(fields[8][0].value) : '0s',
+    status: fields[9]?.[0] ? Number(fields[9][0].value) : 0,
+    inactive_at: fields[10]?.[0] ? decodeTimestamp(fields[10][0].value) : null,
+    start_at: fields[11]?.[0] ? decodeTimestamp(fields[11][0].value) : null,
+    status_at: fields[12]?.[0] ? decodeTimestamp(fields[12][0].value) : null,
+  };
+}
+
+/**
+ * Decode a google.protobuf.Any-wrapped session.
+ * Unwraps the Any (field 1=type_url, field 2=value), then decodes the inner session.
+ * Inner session types:
+ *   - sentinel.node.v3.Session: field 1=base_session, field 2=price
+ *   - sentinel.subscription.v3.Session: field 1=base_session, field 2=subscription_id
+ *
+ * Returns a flat session object matching flattenSession() output from LCD.
+ */
+function decodeAnySession(anyBytes) {
+  const anyFields = decodeProto(anyBytes);
+  const typeUrl = anyFields[1]?.[0] ? decodeString(anyFields[1][0].value) : '';
+  const innerBytes = anyFields[2]?.[0]?.value;
+  if (!innerBytes) return null;
+
+  const sessionFields = decodeProto(innerBytes);
+
+  // Field 1 = base_session (embedded BaseSession)
+  const bs = sessionFields[1]?.[0] ? decodeBaseSession(decodeProto(sessionFields[1][0].value)) : {};
+
+  const result = { ...bs, '@type': typeUrl ? `/${typeUrl}` : undefined };
+
+  if (typeUrl.includes('node')) {
+    // sentinel.node.v3.Session: field 2 = price
+    if (sessionFields[2]?.[0]) {
+      result.price = decodePrice(decodeProto(sessionFields[2][0].value));
+    }
+  } else if (typeUrl.includes('subscription')) {
+    // sentinel.subscription.v3.Session: field 2 = subscription_id
+    if (sessionFields[2]?.[0]) {
+      result.subscription_id = String(sessionFields[2][0].value);
+    }
+  }
+
+  return result;
+}
+
+// ─── Subscription Decoder ───────────────────────────────────────────────────
+
+/**
+ * Decode Subscription proto (sentinel.subscription.v3.Subscription).
+ * Proto field numbers: 1=id, 2=acc_address, 3=plan_id, 4=price,
+ * 5=renewal_price_policy, 6=status, 7=inactive_at, 8=start_at, 9=status_at
+ */
+function decodeSubscription(fields) {
+  return {
+    id: fields[1]?.[0] ? String(fields[1][0].value) : '0',
+    acc_address: fields[2]?.[0] ? decodeString(fields[2][0].value) : '',
+    address: fields[2]?.[0] ? decodeString(fields[2][0].value) : '', // LCD compat alias
+    plan_id: fields[3]?.[0] ? String(fields[3][0].value) : '0',
+    price: fields[4]?.[0] ? decodePrice(decodeProto(fields[4][0].value)) : null,
+    renewal_price_policy: fields[5]?.[0] ? Number(fields[5][0].value) : 0,
+    status: fields[6]?.[0] ? Number(fields[6][0].value) : 0,
+    inactive_at: fields[7]?.[0] ? decodeTimestamp(fields[7][0].value) : null,
+    start_at: fields[8]?.[0] ? decodeTimestamp(fields[8][0].value) : null,
+    status_at: fields[9]?.[0] ? decodeTimestamp(fields[9][0].value) : null,
+  };
+}
+
+// ─── Plan Decoder ───────────────────────────────────────────────────────────
+
+/**
+ * Decode Plan proto (sentinel.plan.v3.Plan).
+ * Proto field numbers: 1=id, 2=prov_address, 3=bytes, 4=duration,
+ * 5=prices (repeated), 6=private, 7=status, 8=status_at
+ */
+function decodePlan(fields) {
+  return {
+    id: fields[1]?.[0] ? String(fields[1][0].value) : '0',
+    prov_address: fields[2]?.[0] ? decodeString(fields[2][0].value) : '',
+    bytes: fields[3]?.[0] ? decodeString(fields[3][0].value) : '0',
+    duration: fields[4]?.[0] ? decodeDuration(fields[4][0].value) : '0s',
+    prices: (fields[5] || []).map(f => decodePrice(decodeProto(f.value))),
+    private: fields[6]?.[0] ? Number(fields[6][0].value) !== 0 : false,
+    status: fields[7]?.[0] ? Number(fields[7][0].value) : 0,
+    status_at: fields[8]?.[0] ? decodeTimestamp(fields[8][0].value) : null,
+  };
+}
+
+// ─── Allocation Decoder ─────────────────────────────────────────────────────
+
+/**
+ * Decode Allocation proto (sentinel.subscription.v2.Allocation).
+ * Proto field numbers: 1=id, 2=address, 3=granted_bytes, 4=utilised_bytes
+ */
+function decodeAllocation(fields) {
+  return {
+    id: fields[1]?.[0] ? String(fields[1][0].value) : '0',
+    address: fields[2]?.[0] ? decodeString(fields[2][0].value) : '',
+    granted_bytes: fields[3]?.[0] ? decodeString(fields[3][0].value) : '0',
+    utilised_bytes: fields[4]?.[0] ? decodeString(fields[4][0].value) : '0',
   };
 }
 
@@ -323,11 +466,12 @@ export async function rpcQueryNodesForPlan(client, planId, { status = 1, limit =
 
 /**
  * Query sessions for an account via RPC.
+ * Returns decoded, flattened session objects (matching LCD flattenSession format).
  *
  * @param {{ queryClient: QueryClient }} client
  * @param {string} address - sent1... address
  * @param {{ limit?: number }} [opts]
- * @returns {Promise<Array<Uint8Array>>} Raw session Any-encoded bytes (need type-specific decoding)
+ * @returns {Promise<Array<object>>} Decoded session objects
  */
 export async function rpcQuerySessionsForAccount(client, address, { limit = 100 } = {}) {
   const path = '/sentinel.session.v3.QueryService/QuerySessionsForAccount';
@@ -339,16 +483,40 @@ export async function rpcQuerySessionsForAccount(client, address, { limit = 100 
   const response = await abciQuery(client.queryClient, path, request);
   const fields = decodeProto(new Uint8Array(response));
   // Field 1 = repeated google.protobuf.Any (sessions)
-  return (fields[1] || []).map(entry => entry.value);
+  return (fields[1] || []).map(entry => decodeAnySession(entry.value)).filter(Boolean);
+}
+
+/**
+ * Query a single session by ID via RPC.
+ * Returns decoded, flattened session object or null.
+ *
+ * @param {{ queryClient: QueryClient }} client
+ * @param {number|bigint|string} sessionId
+ * @returns {Promise<object|null>}
+ */
+export async function rpcQuerySession(client, sessionId) {
+  const path = '/sentinel.session.v3.QueryService/QuerySession';
+  const request = encodeUint64(1, sessionId);
+
+  try {
+    const response = await abciQuery(client.queryClient, path, request);
+    const fields = decodeProto(new Uint8Array(response));
+    // Field 1 = google.protobuf.Any (session)
+    if (!fields[1]?.[0]) return null;
+    return decodeAnySession(fields[1][0].value);
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Query subscriptions for an account via RPC.
+ * Returns decoded subscription objects matching LCD format.
  *
  * @param {{ queryClient: QueryClient }} client
  * @param {string} address - sent1... address
  * @param {{ limit?: number }} [opts]
- * @returns {Promise<Array<Uint8Array>>} Raw subscription bytes
+ * @returns {Promise<Array<object>>} Decoded subscription objects
  */
 export async function rpcQuerySubscriptionsForAccount(client, address, { limit = 100 } = {}) {
   const path = '/sentinel.subscription.v3.QueryService/QuerySubscriptionsForAccount';
@@ -359,7 +527,73 @@ export async function rpcQuerySubscriptionsForAccount(client, address, { limit =
 
   const response = await abciQuery(client.queryClient, path, request);
   const fields = decodeProto(new Uint8Array(response));
-  return (fields[1] || []).map(entry => entry.value);
+  return (fields[1] || []).map(entry => decodeSubscription(decodeProto(entry.value)));
+}
+
+/**
+ * Query a single subscription by ID via RPC.
+ *
+ * @param {{ queryClient: QueryClient }} client
+ * @param {number|bigint|string} subscriptionId
+ * @returns {Promise<object|null>}
+ */
+export async function rpcQuerySubscription(client, subscriptionId) {
+  const path = '/sentinel.subscription.v3.QueryService/QuerySubscription';
+  const request = encodeUint64(1, subscriptionId);
+
+  try {
+    const response = await abciQuery(client.queryClient, path, request);
+    const fields = decodeProto(new Uint8Array(response));
+    if (!fields[1]?.[0]) return null;
+    return decodeSubscription(decodeProto(fields[1][0].value));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Query subscriptions for a plan via RPC.
+ *
+ * @param {{ queryClient: QueryClient }} client
+ * @param {number|bigint} planId
+ * @param {{ limit?: number }} [opts]
+ * @returns {Promise<Array<object>>}
+ */
+export async function rpcQuerySubscriptionsForPlan(client, planId, { limit = 500 } = {}) {
+  const path = '/sentinel.subscription.v3.QueryService/QuerySubscriptionsForPlan';
+  const request = concat([
+    encodeUint64(1, planId),
+    encodeEmbedded(2, encodePagination({ limit })),
+  ]);
+
+  const response = await abciQuery(client.queryClient, path, request);
+  const fields = decodeProto(new Uint8Array(response));
+  return (fields[1] || []).map(entry => decodeSubscription(decodeProto(entry.value)));
+}
+
+/**
+ * Query allocations for a subscription via RPC.
+ * Uses v2 allocation path (v3 not implemented on chain).
+ *
+ * @param {{ queryClient: QueryClient }} client
+ * @param {number|bigint|string} subscriptionId
+ * @param {{ limit?: number }} [opts]
+ * @returns {Promise<Array<{ id: string, address: string, granted_bytes: string, utilised_bytes: string }>>}
+ */
+export async function rpcQuerySubscriptionAllocations(client, subscriptionId, { limit = 100 } = {}) {
+  const path = '/sentinel.subscription.v2.QueryService/QueryAllocations';
+  const request = concat([
+    encodeUint64(1, subscriptionId),
+    encodeEmbedded(2, encodePagination({ limit })),
+  ]);
+
+  try {
+    const response = await abciQuery(client.queryClient, path, request);
+    const fields = decodeProto(new Uint8Array(response));
+    return (fields[1] || []).map(entry => decodeAllocation(decodeProto(entry.value)));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -367,7 +601,7 @@ export async function rpcQuerySubscriptionsForAccount(client, address, { limit =
  *
  * @param {{ queryClient: QueryClient }} client
  * @param {number|bigint} planId
- * @returns {Promise<Uint8Array|null>} Raw plan bytes
+ * @returns {Promise<object|null>} Decoded plan object
  */
 export async function rpcQueryPlan(client, planId) {
   const path = '/sentinel.plan.v3.QueryService/QueryPlan';
@@ -376,7 +610,8 @@ export async function rpcQueryPlan(client, planId) {
   try {
     const response = await abciQuery(client.queryClient, path, request);
     const fields = decodeProto(new Uint8Array(response));
-    return fields[1]?.[0]?.value || null;
+    if (!fields[1]?.[0]) return null;
+    return decodePlan(decodeProto(fields[1][0].value));
   } catch {
     return null;
   }
@@ -390,6 +625,103 @@ export async function rpcQueryPlan(client, planId) {
  * @param {string} [denom='udvpn']
  * @returns {Promise<{ denom: string, amount: string }>}
  */
+/**
+ * Query a specific fee grant between granter and grantee via RPC.
+ * Returns a structured object matching the LCD JSON format, or null if not found.
+ *
+ * @param {{ queryClient: QueryClient }} client - From createRpcQueryClient()
+ * @param {string} granter - Granter address (sent1...)
+ * @param {string} grantee - Grantee address (sent1...)
+ * @returns {Promise<{ allowance: object, granter: string, grantee: string } | null>}
+ */
+export async function rpcQueryFeeGrant(client, granter, grantee) {
+  const path = '/cosmos.feegrant.v1beta1.Query/Allowance';
+  const request = concat([
+    encodeString(1, granter),
+    encodeString(2, grantee),
+  ]);
+
+  let response;
+  try {
+    response = await abciQuery(client.queryClient, path, request);
+  } catch {
+    return null; // Query failed (e.g., 404 = no grant)
+  }
+
+  const respFields = decodeProto(new Uint8Array(response));
+  // Field 1 = Grant message
+  if (!respFields[1]?.[0]) return null;
+  const grantFields = decodeProto(respFields[1][0].value);
+
+  const result = {
+    granter: grantFields[1]?.[0] ? decodeString(grantFields[1][0].value) : granter,
+    grantee: grantFields[2]?.[0] ? decodeString(grantFields[2][0].value) : grantee,
+    allowance: null,
+  };
+
+  // Field 3 = allowance (google.protobuf.Any)
+  if (!grantFields[3]?.[0]) return result;
+  const anyFields = decodeProto(grantFields[3][0].value);
+  const typeUrl = anyFields[1]?.[0] ? decodeString(anyFields[1][0].value) : '';
+  const innerBytes = anyFields[2]?.[0]?.value;
+
+  if (typeUrl.includes('AllowedMsgAllowance') && innerBytes) {
+    // AllowedMsgAllowance: field 1 = inner allowance (Any), field 2 = allowed_messages (repeated string)
+    const amFields = decodeProto(innerBytes);
+    const allowedMessages = (amFields[2] || []).map(f => decodeString(f.value));
+
+    let innerAllowance = null;
+    if (amFields[1]?.[0]) {
+      const innerAnyFields = decodeProto(amFields[1][0].value);
+      const innerTypeUrl = innerAnyFields[1]?.[0] ? decodeString(innerAnyFields[1][0].value) : '';
+      const basicBytes = innerAnyFields[2]?.[0]?.value;
+      if (basicBytes) {
+        innerAllowance = _decodeBasicAllowance(basicBytes);
+        innerAllowance['@type'] = innerTypeUrl;
+      }
+    }
+
+    result.allowance = {
+      '@type': typeUrl,
+      allowance: innerAllowance,
+      allowed_messages: allowedMessages,
+    };
+  } else if (typeUrl.includes('BasicAllowance') && innerBytes) {
+    result.allowance = _decodeBasicAllowance(innerBytes);
+    result.allowance['@type'] = typeUrl;
+  } else {
+    // Unknown allowance type — return type URL for diagnostics
+    result.allowance = { '@type': typeUrl };
+  }
+
+  return result;
+}
+
+/**
+ * Decode BasicAllowance protobuf: field 1 = spend_limit (repeated Coin), field 2 = expiration (Timestamp)
+ */
+function _decodeBasicAllowance(bytes) {
+  const fields = decodeProto(bytes);
+  const spendLimit = (fields[1] || []).map(f => {
+    const coinFields = decodeProto(f.value);
+    return {
+      denom: coinFields[1]?.[0] ? decodeString(coinFields[1][0].value) : '',
+      amount: coinFields[2]?.[0] ? decodeString(coinFields[2][0].value) : '0',
+    };
+  });
+
+  let expiration = null;
+  if (fields[2]?.[0]) {
+    // Timestamp: field 1 = seconds (int64), field 2 = nanos (int32)
+    const tsFields = decodeProto(fields[2][0].value);
+    const seconds = tsFields[1]?.[0] ? Number(tsFields[1][0].value) : 0;
+    const nanos = tsFields[2]?.[0] ? Number(tsFields[2][0].value) : 0;
+    expiration = new Date(seconds * 1000 + nanos / 1_000_000).toISOString();
+  }
+
+  return { spend_limit: spendLimit, expiration };
+}
+
 export async function rpcQueryBalance(client, address, denom = 'udvpn') {
   const path = '/cosmos.bank.v1beta1.Query/Balance';
   const request = concat([

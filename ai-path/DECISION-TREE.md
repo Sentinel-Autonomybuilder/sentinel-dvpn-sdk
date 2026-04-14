@@ -56,38 +56,59 @@ Agent needs wallet
     │
     └── Is wallet funded?
         ├── getBalance(mnemonic) → { funded: true } → continue
-        └── getBalance(mnemonic) → { funded: false }
-            │
-            ├── Agent has crypto on other chains?
-            │   ├── Has ATOM → swap on Osmosis DEX (ATOM → P2P)
-            │   ├── Has USDT/USDC → swap on Osmosis DEX (stable → ATOM → P2P)
-            │   ├── Has ETH → bridge to Cosmos via Gravity Bridge or Axelar, then swap
-            │   └── Has SOL/other → no direct bridge yet
-            │       └── OUTPUT: { action: 'funding-request', address: 'sent1...', amount: '100000 udvpn', reason: 'minimum for 1 VPN session', acceptedTokens: ['udvpn', 'ATOM via Osmosis'] }
-            │
-            ├── Agent has fiat payment method?
-            │   └── OUTPUT: { action: 'fiat-not-supported-yet', workaround: 'buy ATOM on exchange → send to Cosmos wallet → swap to P2P on Osmosis', futureSupport: 'planned' }
-            │
-            ├── Agent is operated by a company/human?
-            │   └── OUTPUT: { action: 'request-funding', to: 'operator', address: 'sent1...', minAmount: '1000000 udvpn (1 P2P)', estimatedUsage: '~10 GB or ~10 sessions' }
-            │
-            └── Agent has no payment capability?
-                └── OUTPUT: {
-                      action: 'funding-needed',
-                      address: 'sent1...',
-                      minAmount: { udvpn: 1000000, p2p: '1.0 P2P', note: 'Covers gas + 1 GB on cheapest node' },
-                      methods: [
-                        { method: 'direct-transfer', description: 'Send P2P tokens to this address' },
-                        { method: 'osmosis-swap', description: 'Swap ATOM/USDT → P2P on app.osmosis.zone' },
-                        { method: 'operator-grant', description: 'Fee grant from plan operator covers gas' },
-                      ],
-                      request: {
-                        type: 'funding-request',
-                        reason: 'Autonomous agent needs VPN access for [task description]',
-                        willingness: 'Will pay up to X per GB if funded',
-                        contact: null,
-                      }
-                    }
+        ├── getBalance(mnemonic) → { funded: false }
+        │   │
+        │   ├── Agent has operator-provisioned access (x402 / fee grant)?
+        │   │   ├── Has subscriptionId + feeGranter → OPERATOR-PROVISIONED MODE
+        │   │   │   └── connect({ mnemonic, subscriptionId, feeGranter, nodeAddress })
+        │   │   │       ├── Fee grant valid → connect with 0 P2P (operator pays gas)
+        │   │   │       ├── FEE_GRANT_NOT_FOUND → request provisioning from operator
+        │   │   │       ├── FEE_GRANT_EXPIRED → request grant renewal from operator
+        │   │   │       ├── FEE_GRANT_EXHAUSTED → request operator to top up grant
+        │   │   │       └── Disconnect also uses fee grant (MsgCancelSessionRequest)
+        │   │   ├── Has planId + feeGranter → PLAN MODE with fee grant
+        │   │   │   └── connect({ mnemonic, planId, feeGranter })
+        │   │   │       └── Subscribes to plan + starts session, operator pays gas
+        │   │   └── Has USDC on Base/Solana → x402 PAYMENT MODE
+        │   │       └── 1. Register sent1... address with x402 server
+        │   │           2. Pay USDC via EIP-3009 (Base) or SPL transfer (Solana)
+        │   │           3. Server provisions: subscription share + fee grant
+        │   │           4. connect({ mnemonic, subscriptionId, feeGranter, nodeAddress })
+        │   │           5. Agent connects with 0 P2P
+        │   │
+        │   ├── Agent has crypto on other chains?
+        │   │   ├── Has ATOM → swap on Osmosis DEX (ATOM → P2P)
+        │   │   ├── Has USDT/USDC → swap on Osmosis DEX (stable → ATOM → P2P)
+        │   │   ├── Has ETH → bridge to Cosmos via Gravity Bridge or Axelar, then swap
+        │   │   └── Has SOL/other → no direct bridge yet
+        │   │       └── OUTPUT: { action: 'funding-request', address: 'sent1...', amount: '100000 udvpn', reason: 'minimum for 1 VPN session', acceptedTokens: ['udvpn', 'ATOM via Osmosis'] }
+        │   │
+        │   ├── Agent has fiat payment method?
+        │   │   └── OUTPUT: { action: 'fiat-not-supported-yet', workaround: 'buy ATOM on exchange → send to Cosmos wallet → swap to P2P on Osmosis', futureSupport: 'planned' }
+        │   │
+        │   ├── Agent is operated by a company/human?
+        │   │   └── OUTPUT: { action: 'request-funding', to: 'operator', address: 'sent1...', minAmount: '1000000 udvpn (1 P2P)', estimatedUsage: '~10 GB or ~10 sessions' }
+        │   │
+        │   └── Agent has no payment capability?
+        │       └── OUTPUT: {
+        │             action: 'funding-needed',
+        │             address: 'sent1...',
+        │             minAmount: { udvpn: 1000000, p2p: '1.0 P2P', note: 'Covers gas + 1 GB on cheapest node' },
+        │             methods: [
+        │               { method: 'direct-transfer', description: 'Send P2P tokens to this address' },
+        │               { method: 'osmosis-swap', description: 'Swap ATOM/USDT → P2P on app.osmosis.zone' },
+        │               { method: 'operator-grant', description: 'Fee grant from plan operator covers gas' },
+        │               { method: 'x402-payment', description: 'Pay USDC on Base/Solana via x402 protocol — operator provisions access' },
+        │             ],
+        │             request: {
+        │               type: 'funding-request',
+        │               reason: 'Autonomous agent needs VPN access for [task description]',
+        │               willingness: 'Will pay up to X per GB if funded',
+        │               contact: null,
+        │             }
+        │           }
+        │
+        └── getBalance(mnemonic) → { funded: true } → continue
 ```
 
 ## Decision Node 4: WHICH NODE DO I CONNECT TO?
@@ -316,27 +337,46 @@ Agent can't solve problem alone
 ```
 Agent has funds but wrong type
     │
+    ├── Has USDC on Base (preferred — cheapest, x402 native)
+    │   ├── x402 protocol: pay USDC on Base → get VPN access instantly
+    │   ├── Price: $0.033/day, $0.233/week, $1.00/month
+    │   ├── Flow: register sent1... → pay via EIP-3009 → server provisions sub + fee grant
+    │   └── OUTPUT: {
+    │         action: 'x402-payment',
+    │         chain: 'base',
+    │         contract: '0x923F41eb162d4F7D274CE8cE8b8178883E7E2196',
+    │         steps: ['register sent1... with x402 server', 'approve USDC', 'pay via contract', 'connect with subscriptionId + feeGranter'],
+    │         estimatedTime: '<30s',
+    │         estimatedFees: '<$0.001 (Base L2 gas)',
+    │         pricing: { '1day': '$0.033', '7days': '$0.233', '30days': '$1.00' },
+    │       }
+    │
+    ├── Has USDC on Solana
+    │   ├── x402 protocol: SPL transfer + memo to operator
+    │   └── OUTPUT: { action: 'x402-payment', chain: 'solana', steps: ['SPL transfer to operator ATA', 'memo: x402:sent1...:hours:N'], estimatedTime: '<5s' }
+    │
     ├── Has USDT (ERC-20 Ethereum)
     │   ├── Bridge: Gravity Bridge or Axelar to Cosmos
     │   ├── Then: Osmosis DEX swap USDT → P2P
     │   └── OUTPUT: { action: 'cross-chain-swap', steps: ['bridge to cosmos', 'swap on osmosis'], estimatedTime: '15-30min', estimatedFees: '~$2-5 bridge + swap' }
     │
-    ├── Has USDC (multiple chains)
+    ├── Has USDC on other chains (Ethereum, Cosmos/Noble)
     │   ├── If on Cosmos/Noble → direct swap on Osmosis
-    │   ├── If on Ethereum → bridge first
-    │   └── OUTPUT: { steps: [...], cheapestPath: 'Noble USDC → Osmosis → P2P' }
+    │   ├── If on Ethereum → bridge first (or swap to Base USDC and use x402)
+    │   └── OUTPUT: { steps: [...], cheapestPath: 'Bridge to Base → x402 payment' }
     │
-    ├── Has SOL
-    │   ├── No direct bridge to Cosmos yet
-    │   └── OUTPUT: { action: 'unsupported-currently', workaround: 'swap SOL→USDT on DEX, bridge to Cosmos, swap to P2P' }
+    ├── Has SOL (not USDC)
+    │   ├── Swap SOL → USDC on Jupiter/Raydium, then use x402 Solana payment
+    │   └── OUTPUT: { action: 'swap-then-x402', steps: ['swap SOL→USDC on Jupiter', 'x402 payment via Solana'], estimatedTime: '<30s' }
     │
     ├── Has BTC
     │   ├── Nomic bridge (BTC → nBTC on Cosmos) → Osmosis → P2P
     │   └── OUTPUT: { action: 'cross-chain-swap', via: 'Nomic Bridge', steps: [...] }
     │
     ├── Has credit card / fiat only
-    │   ├── Buy ATOM on Coinbase/Binance/Kraken → withdraw to Cosmos wallet → Osmosis → P2P
-    │   └── OUTPUT: { action: 'fiat-onramp', steps: ['buy ATOM on exchange', 'withdraw to sent1... address', 'swap on Osmosis'], estimatedTime: '1-24h depending on exchange' }
+    │   ├── Buy USDC on Coinbase → send to Base wallet → use x402 (fastest)
+    │   ├── Buy ATOM on exchange → withdraw to Cosmos → Osmosis → P2P (slower)
+    │   └── OUTPUT: { action: 'fiat-onramp', steps: ['buy USDC on Coinbase/Binance', 'withdraw to Base wallet', 'x402 payment'], estimatedTime: '1-24h depending on exchange' }
     │
     └── Has nothing — pure autonomous agent with no funds
         └── OUTPUT: {
@@ -349,6 +389,7 @@ Agent has funds but wrong type
                 planOperatorBenefit: 'Agent drives usage and network growth',
               },
               alternatives: [
+                'x402 payment: pay USDC on Base/Solana (cheapest — $0.033/day)',
                 'Apply for fee grant from plan operator',
                 'Request funding from agent marketplace (future)',
                 'Earn tokens by providing node quality reports (future)',
@@ -360,7 +401,10 @@ Agent has funds but wrong type
 
 | Error Code | Agent Action |
 |-----------|-------------|
-| `INSUFFICIENT_BALANCE` | Fund wallet → Decision Node 3 |
+| `INSUFFICIENT_BALANCE` | Fund wallet → Decision Node 3 (or use x402/fee grant) |
+| `FEE_GRANT_NOT_FOUND` | No fee grant from operator → request provisioning |
+| `FEE_GRANT_EXPIRED` | Fee grant expired → request renewal from operator |
+| `FEE_GRANT_EXHAUSTED` | Fee grant spend limit too low → request operator to top up |
 | `NODE_OFFLINE` | SDK auto-retries. If all fail → try different country |
 | `NODE_INACTIVE` | SDK retries after 15s. If fails → different node |
 | `V2RAY_NOT_FOUND` | Run `node setup.js` |

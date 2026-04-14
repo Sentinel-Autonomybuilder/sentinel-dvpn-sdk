@@ -532,6 +532,158 @@ Event attributes may be base64-encoded (depends on CosmJS version). The SDK hand
 
 **Minimum 7 seconds between transactions.** Rapid TX submission causes sequence mismatch cascades. NEVER run parallel chain operations -- rate limits will kill your internet connectivity.
 
+### Fee-Granted Session Creation (Operator-Provisioned Mode)
+
+When an operator has provisioned a subscription share and fee grant for the agent, the session creation flow changes:
+
+#### Pre-Check: Fee Grant Validity
+
+Before attempting the session TX, the SDK validates the fee grant on-chain using **RPC first** (protobuf, ~250ms), with **LCD fallback** (~880ms). This matches the SDK standard: all chain queries use RPC with LCD as a safety net.
+
+**RPC path (primary):**
+
+```javascript
+import { createRpcQueryClientWithFallback, rpcQueryFeeGrant } from 'sentinel-dvpn-sdk';
+
+const rpcClient = await createRpcQueryClientWithFallback();
+const grant = await rpcQueryFeeGrant(rpcClient, granter, grantee);
+```
+
+`rpcQueryFeeGrant` performs a protobuf ABCI query to `/cosmos.feegrant.v1beta1.Query/Allowance`. It decodes the nested protobuf response: `Grant` → `Any` (allowance) → `AllowedMsgAllowance` → `BasicAllowance` → `spend_limit` + `expiration`.
+
+**LCD path (fallback):**
+
+```
+GET /cosmos/feegrant/v1beta1/allowance/{granter}/{grantee}
+```
+
+Used only when RPC fails. Falls back across `LCD_ENDPOINTS` via `tryWithFallback()`.
+
+**Response structure** (both RPC and LCD normalize to this):
+
+```json
+{
+  "allowance": {
+    "@type": "/cosmos.feegrant.v1beta1.AllowedMsgAllowance",
+    "allowance": {
+      "@type": "/cosmos.feegrant.v1beta1.BasicAllowance",
+      "spend_limit": [{ "denom": "udvpn", "amount": "5000000" }],
+      "expiration": "2026-04-16T00:00:00Z"
+    },
+    "allowed_messages": [
+      "/sentinel.subscription.v3.MsgStartSessionRequest",
+      "/sentinel.session.v3.MsgCancelSessionRequest",
+      "/sentinel.session.v3.MsgUpdateSessionRequest",
+      "/sentinel.node.v3.MsgStartSessionRequest"
+    ]
+  }
+}
+```
+
+**The SDK performs five checks:**
+
+1. **Existence** — grant is non-null → `FEE_GRANT_NOT_FOUND` if missing
+2. **Structure detection** — robust `@type`-based detection of `AllowedMsgAllowance` vs bare `BasicAllowance` (handles both wrapped and unwrapped)
+3. **Expiration** — `FEE_GRANT_EXPIRED` if past; warns if < 1 hour remaining
+4. **Spend limit** — parses `spend_limit` array, finds `udvpn` coin. `FEE_GRANT_EXHAUSTED` if < 20,000 udvpn (minimum for one session TX)
+5. **Allowed messages** — warns (non-blocking) if `MsgStartSession` / `MsgStartSessionRequest` not in list
+
+Errors: `FEE_GRANT_NOT_FOUND`, `FEE_GRANT_EXPIRED`, `FEE_GRANT_EXHAUSTED`
+
+#### Session TX via Subscription
+
+Message type: `/sentinel.subscription.v3.MsgStartSessionRequest`
+
+| Field # | Name | Type | Description |
+|---------|------|------|-------------|
+| 1 | `from` | string | Agent's `sent1...` address |
+| 2 | `id` | uint64 | Subscription ID (from operator provisioning) |
+| 3 | `node_address` | string | Target `sentnode1...` address |
+
+The TX is broadcast via `broadcastWithFeeGrant()` which sets the `granter` field in the TX fee:
+
+```javascript
+const fee = {
+  amount: [{ denom: 'udvpn', amount: '20000' }],
+  gas: '200000',
+  granter: feeGranterAddress, // Chain deducts from granter's account
+};
+await client.signAndBroadcast(signerAddress, [msg], fee);
+```
+
+**Fallback:** If fee grant broadcast fails (expired grant, spend limit exhausted), the SDK falls back to `broadcastWithInactiveRetry()` using the agent's own balance. If agent has 0 P2P, this also fails and the error is propagated.
+
+#### Disconnect with Fee Grant
+
+On disconnect, the SDK sends `MsgCancelSessionRequest` using the same fee grant:
+
+```javascript
+// _endSessionOnChain stores feeGranter from connect-time
+const msg = buildEndSessionMsg(agentAddress, sessionId);
+if (feeGranter) {
+  result = await broadcastWithFeeGrant(client, agentAddress, [msg], feeGranter);
+} else {
+  result = await client.signAndBroadcast(agentAddress, [msg], fee);
+}
+```
+
+The `feeGranter` is stored in `ConnectionState._feeGranter` during connect and cleared on disconnect. All 9 disconnect call sites (graceful, abort, error cleanup, crash handler, etc.) pass `state._feeGranter` to `_endSessionOnChain`.
+
+#### Crash Persistence of feeGranter
+
+The `feeGranter` is persisted to `credentials.enc.json` (AES-256-GCM encrypted, per-node credential store at `~/.sentinel-sdk/credentials.enc.json`). Both WireGuard and V2Ray `saveCredentials()` calls include the field:
+
+```javascript
+saveCredentials(nodeAddress, String(sessionId), {
+  serviceType: 'wireguard', // or 'v2ray'
+  // ... protocol-specific fields ...
+  ...(state._feeGranter ? { feeGranter: state._feeGranter } : {}),
+});
+```
+
+On crash recovery, `tryFastReconnect()` restores it:
+
+```javascript
+if (saved.feeGranter && state) {
+  state._feeGranter = saved.feeGranter;
+}
+```
+
+Without this, a crashed agent with 0 P2P would restore the tunnel but be unable to end the session on-chain (disconnect TX would fail with insufficient funds).
+
+**Rule:** Every in-memory state that affects disconnect MUST be persisted to `credentials.enc.json`. See FAILURES.md W4.
+
+#### autoReconnect Dispatch
+
+`autoReconnect()` in `resilience.js` dispatches based on original connection mode:
+
+```javascript
+if (opts.subscriptionId) {
+  result = await connectViaSubscription(opts);  // fee grant preserved
+} else if (opts.planId) {
+  result = await connectViaPlan(opts);          // fee grant preserved
+} else {
+  result = await connectAuto(opts);             // self-pay mode
+}
+```
+
+Previously hardcoded to `connectAuto()`, which would fail with `INSUFFICIENT_BALANCE` for 0-P2P agents. See FAILURES.md W6.
+
+**If disconnect TX fails** (fee grant expired, spend limit exhausted, agent has 0 P2P): the session is NOT ended on-chain. It expires naturally based on the subscription's allocation. This is acceptable behavior — the session simply times out.
+
+#### Required Fee Grant Allowed Messages
+
+The operator's fee grant must include these message types:
+
+| Message Type | Purpose |
+|-------------|---------|
+| `/sentinel.subscription.v3.MsgStartSessionRequest` | Start session via subscription |
+| `/sentinel.node.v3.MsgStartSessionRequest` | Start session via node (direct) |
+| `/sentinel.session.v3.MsgCancelSessionRequest` | End/cancel session |
+| `/sentinel.session.v3.MsgUpdateSessionRequest` | Update session allocation |
+
+If `MsgCancelSessionRequest` is NOT in the allowed messages, the agent cannot end sessions cleanly. Sessions will expire naturally, but the agent cannot reclaim unused allocation.
+
 ---
 
 ## Phase 7: Index Wait
@@ -1086,7 +1238,7 @@ await conn.cleanup();
 4. **Clear system proxy:** Restore previous proxy settings (Windows registry / macOS / Linux)
 5. **Kill V2Ray:** `process.kill()` on the V2Ray child process
 6. **Uninstall WireGuard:** `wireguard.exe /uninstalltunnelservice wgsent0`
-7. **End session on chain:** `MsgCancelSessionRequest` (fire-and-forget, best-effort)
+7. **End session on chain:** `MsgCancelSessionRequest` (fire-and-forget, best-effort). If `state._feeGranter` is set (operator-provisioned mode), uses `broadcastWithFeeGrant` so agent with 0 P2P can still end the session on-chain.
 8. **Zero mnemonic:** `state._mnemonic = null`
 9. **Clear connection state:** `state.connection = null`
 10. **Clear persisted state:** Remove crash recovery files

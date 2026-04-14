@@ -29,7 +29,7 @@ import {
 import { findV2RayExe } from './tunnel.js';
 import { enableKillSwitch, isKillSwitchEnabled as _isKillSwitchEnabled } from './security.js';
 import { setSystemProxy, clearSystemProxy, checkPortFree } from './proxy.js';
-import { connectAuto } from './connect.js';
+import { connectAuto, connectViaSubscription, connectViaPlan } from './connect.js';
 
 // ─── Circuit Breaker ─────────────────────────────────────────────────────────
 // v22: Skip nodes that repeatedly fail. Resets after TTL expires.
@@ -405,7 +405,15 @@ export function autoReconnect(opts) {
 
     if (stopped) return;
     try {
-      const result = await connectAuto(opts);
+      // Dispatch to correct connect function based on original connection mode
+      let result;
+      if (opts.subscriptionId) {
+        result = await connectViaSubscription(opts);
+      } else if (opts.planId) {
+        result = await connectViaPlan(opts);
+      } else {
+        result = await connectAuto(opts);
+      }
       retries = 0;
       wasConnected = true;
       if (opts.onReconnected) try { opts.onReconnected(result); } catch {}

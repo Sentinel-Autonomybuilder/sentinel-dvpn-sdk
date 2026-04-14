@@ -306,6 +306,8 @@ await disconnect();
 // On-chain session end is fire-and-forget -- it may take a few seconds.
 ```
 
+**Fee-granted disconnect:** When the connection was established with `feeGranter`, the SDK remembers the granter address and uses it for the `MsgCancelSessionRequest` TX on disconnect. If the fee grant has expired or been exhausted by disconnect time, the session ends naturally when the subscription allocation expires. No tokens are lost.
+
 ### Session Recovery
 
 If a connection partially succeeds (payment TX broadcast but tunnel failed), the session exists on-chain and can be recovered without paying again. Use the SDK's `recoverSession`:
@@ -864,6 +866,102 @@ await disconnect();
 ```
 
 **Important:** Node.js native `fetch()` silently ignores SOCKS5 proxy configuration. Use `axios` with an explicit agent, not `fetch()`.
+
+### Pattern 6: Operator-Provisioned Mode (Zero P2P / Fee-Granted)
+
+When an operator has provisioned access for the agent (e.g., via x402 payment protocol), the agent connects with **zero P2P tokens**. The operator's fee grant covers all gas costs.
+
+This mode requires three things from the operator:
+1. **Subscription share** -- operator added agent's `sent1...` address to their plan subscription
+2. **Fee grant** -- operator created a fee allowance so agent pays 0 gas on Sentinel
+3. **Node address** -- a node linked to the operator's plan
+
+```js
+import { connect, disconnect } from 'sentinel-ai-connect';
+
+// Agent has 0 P2P — operator covers gas via fee grant
+const vpn = await connect({
+  mnemonic: process.env.MNEMONIC,
+
+  // Operator-provisioned fields (from provisioning response)
+  subscriptionId: 12345,                                        // Operator's subscription
+  feeGranter: 'sent1operatoraddress...', // Operator pays gas
+  nodeAddress: 'sentnode1abc...', // Plan node
+
+  onProgress: (step, detail) => console.log(`[${step}] ${detail}`),
+});
+
+console.log(`Connected: ${vpn.protocol} | IP: ${vpn.ip}`);
+await disconnect();
+```
+
+**How it works:**
+- Balance check is skipped when `feeGranter` is set (agent may have 0 P2P)
+- Fee grant is validated before connecting via RPC (protobuf, ~250ms) with LCD fallback
+- Session TX is broadcast via `broadcastWithFeeGrant` — chain deducts gas from granter
+- Disconnect also uses fee grant for the `MsgCancelSessionRequest` TX
+- If fee grant fails at any step, SDK falls back to agent's own balance (if available)
+
+#### Fee Grant Pre-Check (Step 3.5)
+
+Before attempting the session TX, the SDK validates the fee grant on-chain. This runs between the balance check (Step 3) and node selection (Step 4):
+
+1. **Query grant** — RPC first (`rpcQueryFeeGrant`, protobuf ABCI query, ~250ms), LCD fallback (`queryFeeGrant` via `tryWithFallback`, ~880ms). Matches the SDK standard: all chain queries use RPC with LCD as a safety net.
+2. **Existence check** — `FEE_GRANT_NOT_FOUND` if no grant exists from granter to grantee.
+3. **Expiration check** — `FEE_GRANT_EXPIRED` if the grant's expiration is in the past. Warns if < 1 hour remaining.
+4. **Spend limit check** — `FEE_GRANT_EXHAUSTED` if `spend_limit` has < 20,000 udvpn remaining (minimum for one session TX).
+5. **Allowed messages check** — Warns (non-blocking) if `MsgStartSession` / `MsgStartSessionRequest` is not in the grant's `allowed_messages` list.
+
+The grant structure on-chain is `AllowedMsgAllowance` wrapping a `BasicAllowance`. The SDK uses robust `@type`-based detection to handle both wrapped and unwrapped grant formats.
+
+**Fee grant pre-check errors:**
+
+| Error Code | Meaning | `nextAction` | Action |
+|---|---|---|---|
+| `FEE_GRANT_NOT_FOUND` | No grant from granter to grantee on-chain | `request_fee_grant` | Request provisioning from operator |
+| `FEE_GRANT_EXPIRED` | Grant existed but expiration is past | `request_fee_grant_renewal` | Request grant renewal from operator |
+| `FEE_GRANT_EXHAUSTED` | Grant spend limit < 20,000 udvpn | `request_fee_grant_renewal` | Request operator to top up grant |
+
+All errors include `err.code`, `err.nextAction`, and `err.details` (with `granter`, `grantee`, and context-specific fields) for programmatic handling by agents.
+
+#### Crash Recovery
+
+The `feeGranter` is persisted to `credentials.enc.json` (AES-256-GCM encrypted) alongside session credentials. If the agent process crashes and restarts:
+
+1. `tryFastReconnect()` loads credentials from disk
+2. Restores `state._feeGranter` from `saved.feeGranter`
+3. Tunnel is restored (WireGuard adapter or V2Ray process)
+4. Disconnect correctly uses fee grant — no tokens needed
+
+Without this persistence, a crashed agent with 0 P2P would be unable to end its session on-chain after recovery.
+
+#### Auto-Reconnect
+
+`autoReconnect()` dispatches based on the original connection mode:
+
+- `opts.subscriptionId` → `connectViaSubscription(opts)` — fee grant preserved
+- `opts.planId` → `connectViaPlan(opts)` — fee grant preserved
+- Neither → `connectAuto(opts)` — self-pay mode
+
+This ensures fee-granted agents don't fall back to direct payment (which would fail with 0 P2P).
+
+#### Fee-Granted Disconnect
+
+When connected with `feeGranter`, the SDK stores the granter address in `state._feeGranter`. On `disconnect()`, `_endSessionOnChain` uses `broadcastWithFeeGrant()` for the `MsgCancelSessionRequest` TX. All 9 disconnect call sites (graceful, abort, error cleanup, crash handler, etc.) pass through `state._feeGranter`.
+
+If the fee grant has expired or been exhausted by disconnect time, the session ends naturally when the subscription allocation expires. No tokens are lost.
+
+**Alternative: Plan mode** -- if the agent doesn't have a specific subscription ID but knows the plan:
+
+```js
+const vpn = await connect({
+  mnemonic: process.env.MNEMONIC,
+  planId: 42,                                                  // Subscribe + connect
+  feeGranter: 'sent1operatoraddress...',  // Operator pays gas
+});
+```
+
+Plan mode subscribes to the plan AND starts a session in one flow. Use `subscriptionId` when the operator already provisioned a subscription; use `planId` when the agent subscribes itself.
 
 ---
 

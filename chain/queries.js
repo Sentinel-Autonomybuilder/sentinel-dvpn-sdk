@@ -1,8 +1,9 @@
 /**
  * Sentinel SDK — Chain / Queries Module
  *
- * All LCD-based query functions: balance, nodes, sessions, subscriptions,
- * plans, pricing, discovery, and display/serialization helpers.
+ * RPC-first query functions with LCD fallback.
+ * All queries try RPC (protobuf via CosmJS ABCI) first for speed (~912x faster),
+ * then fall back to LCD (REST) if RPC fails.
  *
  * Usage:
  *   import { getBalance, fetchActiveNodes, queryNode } from './chain/queries.js';
@@ -16,9 +17,42 @@ import { LCD_ENDPOINTS, tryWithFallback } from '../defaults.js';
 import { ValidationError, NodeError, ChainError, ErrorCodes } from '../errors.js';
 import { extractSessionId } from '../v3protocol.js';
 import { lcd, lcdQuery, lcdQueryAll, lcdPaginatedSafe } from './lcd.js';
+import {
+  createRpcQueryClientWithFallback,
+  rpcQueryNodes,
+  rpcQueryNode,
+  rpcQueryNodesForPlan,
+  rpcQuerySession,
+  rpcQuerySessionsForAccount,
+  rpcQuerySubscription,
+  rpcQuerySubscriptionsForAccount,
+  rpcQuerySubscriptionsForPlan,
+  rpcQuerySubscriptionAllocations as rpcQuerySubAllocations,
+  rpcQueryPlan,
+  rpcQueryBalance,
+} from './rpc.js';
 
 // Re-export for convenience
 export { extractSessionId };
+
+// ─── RPC Client Helper ─────────────────────────────────────────────────────
+
+let _rpcClient = null;
+let _rpcClientPromise = null;
+
+/**
+ * Get or create a cached RPC query client. Returns null if all RPC endpoints fail
+ * (caller should fall back to LCD).
+ */
+async function getRpcClient() {
+  if (_rpcClient) return _rpcClient;
+  if (_rpcClientPromise) return _rpcClientPromise;
+  _rpcClientPromise = createRpcQueryClientWithFallback()
+    .then(client => { _rpcClient = client; return client; })
+    .catch(() => { _rpcClient = null; return null; })
+    .finally(() => { _rpcClientPromise = null; });
+  return _rpcClientPromise;
+}
 
 // ─── Query Helpers ───────────────────────────────────────────────────────────
 
@@ -35,20 +69,38 @@ export async function getBalance(client, address) {
 /**
  * Find an existing active session for a wallet+node pair.
  * Returns session ID (BigInt) or null. Use this to avoid double-paying.
- *
- * Note: Sessions have a nested base_session object containing the actual data.
+ * RPC-first with LCD fallback.
  */
 export async function findExistingSession(lcdUrl, walletAddr, nodeAddr) {
-  const { items } = await lcdPaginatedSafe(lcdUrl, `/sentinel/session/v3/sessions?address=${walletAddr}&status=1`, 'sessions');
-  for (const s of items) {
-    const bs = s.base_session || s;
-    if ((bs.node_address || bs.node) !== nodeAddr) continue;
-    if (bs.status && bs.status !== 'active') continue;
-    const acct = bs.acc_address || bs.address;
+  let sessions;
+
+  // RPC-first: returns decoded, flat session objects
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      sessions = await rpcQuerySessionsForAccount(rpc, walletAddr, { limit: 500 });
+    }
+  } catch { /* RPC failed, fall through to LCD */ }
+
+  if (!sessions) {
+    // LCD fallback
+    const { items } = await lcdPaginatedSafe(lcdUrl, `/sentinel/session/v3/sessions?address=${walletAddr}&status=1`, 'sessions');
+    sessions = items.map(s => {
+      const bs = s.base_session || s;
+      return { ...bs, price: s.price, subscription_id: s.subscription_id };
+    });
+  }
+
+  for (const s of sessions) {
+    if ((s.node_address || s.node) !== nodeAddr) continue;
+    // RPC returns status as number (1=active), LCD as string
+    const st = s.status;
+    if (st && st !== 1 && st !== 'active') continue;
+    const acct = s.acc_address || s.address;
     if (acct && acct !== walletAddr) continue;
-    const maxBytes = parseInt(bs.max_bytes || '0');
-    const used = parseInt(bs.download_bytes || '0') + parseInt(bs.upload_bytes || '0');
-    if (maxBytes === 0 || used < maxBytes) return BigInt(bs.id);
+    const maxBytes = parseInt(s.max_bytes || '0');
+    const used = parseInt(s.download_bytes || '0') + parseInt(s.upload_bytes || '0');
+    if (maxBytes === 0 || used < maxBytes) return BigInt(s.id);
   }
   return null;
 }
@@ -80,7 +132,7 @@ const NODE_CACHE_TTL = 5 * 60_000; // 5 minutes
 export function invalidateNodeCache() { _nodeListCache = null; }
 
 /**
- * Fetch all active nodes from LCD with pagination.
+ * Fetch all active nodes via RPC (primary) with LCD fallback.
  * Returns array of node objects. Each node has:
  * - `remote_url`: the first usable HTTPS URL (for primary connection)
  * - `remoteAddrs`: ALL remote addresses (for fallback on connection failure)
@@ -93,7 +145,21 @@ export async function fetchActiveNodes(lcdUrl, limit = 500, maxPages = 20) {
     return _nodeListCache.map(n => ({ ...n, planIds: [...(n.planIds || [])] }));
   }
 
-  const { items } = await lcdPaginatedSafe(lcdUrl, '/sentinel/node/v3/nodes?status=1', 'nodes', { limit });
+  let items;
+  try {
+    // RPC-first: ~912x faster than LCD for bulk node queries
+    const rpc = await getRpcClient();
+    if (rpc) {
+      items = await rpcQueryNodes(rpc, { status: 1, limit });
+    }
+  } catch { /* RPC failed, fall through to LCD */ }
+
+  if (!items) {
+    // LCD fallback
+    const result = await lcdPaginatedSafe(lcdUrl, '/sentinel/node/v3/nodes?status=1', 'nodes', { limit });
+    items = result.items;
+  }
+
   for (const n of items) {
     // Preserve ALL remote addresses for fallback
     const addrs = n.remote_addrs || [];
@@ -228,21 +294,35 @@ export async function getNodePrices(nodeAddress, lcdUrl) {
 
 /**
  * Query a wallet's active subscriptions.
+ * RPC-first with LCD fallback.
  * @param {string} lcdUrl
  * @param {string} walletAddr - sent1... address
- * @returns {Promise<{ subscriptions: any[], total: number|null }>}
+ * @returns {Promise<{ items: any[], total: number|null }>}
  */
 export async function querySubscriptions(lcdUrl, walletAddr, opts = {}) {
-  // v26: Correct LCD endpoint for wallet subscriptions
-  let path = `/sentinel/subscription/v3/accounts/${walletAddr}/subscriptions`;
-  if (opts.status) path += `?status=${opts.status === 'active' ? '1' : '2'}`;
-  return lcdQueryAll(path, { lcdUrl, dataKey: 'subscriptions' });
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      let subs = await rpcQuerySubscriptionsForAccount(rpc, walletAddr, { limit: 500 });
+      if (opts.status) {
+        const statusNum = opts.status === 'active' ? 1 : 2;
+        subs = subs.filter(s => s.status === statusNum);
+      }
+      return { items: subs, total: subs.length };
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
+  let lcdPath = `/sentinel/subscription/v3/accounts/${walletAddr}/subscriptions`;
+  if (opts.status) lcdPath += `?status=${opts.status === 'active' ? '1' : '2'}`;
+  return lcdQueryAll(lcdPath, { lcdUrl, dataKey: 'subscriptions' });
 }
 
 /**
  * Query a single session directly by ID — O(1) instead of scanning all wallet sessions.
  * Returns the flattened session object or null if not found.
- * Use this when you know the session ID (e.g., from batch TX events).
+ * RPC-first with LCD fallback.
  *
  * @param {string} lcdUrl - LCD endpoint URL
  * @param {string|number|bigint} sessionId - Session ID to query
@@ -253,6 +333,16 @@ export async function querySubscriptions(lcdUrl, walletAddr, opts = {}) {
  *   if (session) console.log(`Session ${session.id} on node ${session.node_address}`);
  */
 export async function querySessionById(lcdUrl, sessionId) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      const session = await rpcQuerySession(rpc, sessionId);
+      if (session) return session;
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
   try {
     const data = await lcd(lcdUrl, `/sentinel/session/v3/sessions/${sessionId}`);
     const raw = data?.session;
@@ -263,30 +353,45 @@ export async function querySessionById(lcdUrl, sessionId) {
 
 /**
  * Query session allocation (remaining bandwidth).
+ * RPC-first with LCD fallback.
  * @param {string} lcdUrl
  * @param {string|number|bigint} sessionId
  * @returns {Promise<{ maxBytes: number, usedBytes: number, remainingBytes: number, percentUsed: number }|null>}
  */
 export async function querySessionAllocation(lcdUrl, sessionId) {
+  let s = null;
+
+  // RPC-first: query session by ID returns flat decoded object
   try {
-    const data = await lcd(lcdUrl, `/sentinel/session/v3/sessions/${sessionId}`);
-    const s = data.session?.base_session || data.session || {};
-    const maxBytes = parseInt(s.max_bytes || '0', 10);
-    const dl = parseInt(s.download_bytes || '0', 10);
-    const ul = parseInt(s.upload_bytes || '0', 10);
-    const usedBytes = dl + ul;
-    return {
-      maxBytes,
-      usedBytes,
-      remainingBytes: Math.max(0, maxBytes - usedBytes),
-      percentUsed: maxBytes > 0 ? Math.round((usedBytes / maxBytes) * 100) : 0,
-    };
-  } catch { return null; }
+    const rpc = await getRpcClient();
+    if (rpc) {
+      s = await rpcQuerySession(rpc, sessionId);
+    }
+  } catch { /* fall through */ }
+
+  if (!s) {
+    // LCD fallback
+    try {
+      const data = await lcd(lcdUrl, `/sentinel/session/v3/sessions/${sessionId}`);
+      s = data.session?.base_session || data.session || null;
+    } catch { return null; }
+  }
+
+  if (!s) return null;
+  const maxBytes = parseInt(s.max_bytes || '0', 10);
+  const dl = parseInt(s.download_bytes || '0', 10);
+  const ul = parseInt(s.upload_bytes || '0', 10);
+  const usedBytes = dl + ul;
+  return {
+    maxBytes,
+    usedBytes,
+    remainingBytes: Math.max(0, maxBytes - usedBytes),
+    percentUsed: maxBytes > 0 ? Math.round((usedBytes / maxBytes) * 100) : 0,
+  };
 }
 
 /**
- * Fetch a single node by address from LCD (no need to fetch all 1000+ nodes).
- * Tries the direct v3 endpoint first, falls back to paginated search.
+ * Fetch a single node by address via RPC (primary) with LCD fallback.
  *
  * @param {string} nodeAddress - sentnode1... address
  * @param {object} [opts]
@@ -298,6 +403,21 @@ export async function queryNode(nodeAddress, opts = {}) {
     throw new ValidationError(ErrorCodes.INVALID_NODE_ADDRESS, 'nodeAddress must be sentnode1...', { nodeAddress });
   }
 
+  // RPC-first: single node query is fast and avoids LCD rate limits
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      const node = await rpcQueryNode(rpc, nodeAddress);
+      if (node) {
+        node.remote_url = resolveNodeUrl(node);
+        const addrs = node.remote_addrs || [];
+        node.remoteAddrs = addrs.map(a => a.startsWith('http') ? a : `https://${a}`);
+        return node;
+      }
+    }
+  } catch { /* RPC failed, fall through to LCD */ }
+
+  // LCD fallback
   const fetchDirect = async (baseUrl) => {
     try {
       const data = await lcdQuery(`/sentinel/node/v3/nodes/${nodeAddress}`, { lcdUrl: baseUrl });
@@ -308,18 +428,19 @@ export async function queryNode(nodeAddress, opts = {}) {
     } catch { /* fall through to full list */ }
     const { items } = await lcdPaginatedSafe(baseUrl, '/sentinel/node/v3/nodes?status=1', 'nodes');
     const found = items.find(n => n.address === nodeAddress);
-    if (!found) throw new NodeError(ErrorCodes.NODE_NOT_FOUND, `Node ${nodeAddress} not found on LCD (may be inactive)`, { nodeAddress });
+    if (!found) throw new NodeError(ErrorCodes.NODE_NOT_FOUND, `Node ${nodeAddress} not found (may be inactive)`, { nodeAddress });
     found.remote_url = resolveNodeUrl(found);
     return found;
   };
 
   if (opts.lcdUrl) return fetchDirect(opts.lcdUrl);
-  const { result } = await tryWithFallback(LCD_ENDPOINTS, fetchDirect, `LCD node lookup ${nodeAddress}`);
+  const { result } = await tryWithFallback(LCD_ENDPOINTS, fetchDirect, `node lookup ${nodeAddress}`);
   return result;
 }
 
 /**
  * List all sessions for a wallet address.
+ * RPC-first with LCD fallback.
  * @param {string} address - sent1... wallet address
  * @param {string} [lcdUrl]
  * @param {object} [opts]
@@ -327,10 +448,25 @@ export async function queryNode(nodeAddress, opts = {}) {
  * @returns {Promise<{ items: ChainSession[], total: number }>}
  */
 export async function querySessions(address, lcdUrl, opts = {}) {
-  let path = `/sentinel/session/v3/sessions?address=${address}`;
-  if (opts.status) path += `&status=${opts.status}`;
-  const result = await lcdPaginatedSafe(lcdUrl, path, 'sessions');
-  // Auto-flatten base_session nesting so devs don't hit session.id === undefined
+  // RPC-first: returns already-flat decoded sessions
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      const sessions = await rpcQuerySessionsForAccount(rpc, address, { limit: 500 });
+      // Filter by status if requested (RPC returns all statuses)
+      let items = sessions;
+      if (opts.status) {
+        const statusNum = parseInt(opts.status, 10);
+        items = sessions.filter(s => s.status === statusNum);
+      }
+      return { items, total: items.length };
+    }
+  } catch { /* fall through to LCD */ }
+
+  // LCD fallback
+  let lcdPath = `/sentinel/session/v3/sessions?address=${address}`;
+  if (opts.status) lcdPath += `&status=${opts.status}`;
+  const result = await lcdPaginatedSafe(lcdUrl, lcdPath, 'sessions');
   result.items = result.items.map(flattenSession);
   return result;
 }
@@ -369,11 +505,22 @@ export function flattenSession(session) {
 
 /**
  * Get a single subscription by ID.
+ * RPC-first with LCD fallback.
  * @param {string|number} id - Subscription ID
  * @param {string} [lcdUrl]
  * @returns {Promise<Subscription|null>}
  */
 export async function querySubscription(id, lcdUrl) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      const sub = await rpcQuerySubscription(rpc, id);
+      if (sub) return sub;
+    }
+  } catch { /* fall through */ }
+
+  // LCD fallback
   try {
     const data = await lcdQuery(`/sentinel/subscription/v3/subscriptions/${id}`, { lcdUrl });
     return data.subscription || null;
@@ -382,6 +529,7 @@ export async function querySubscription(id, lcdUrl) {
 
 /**
  * Check if wallet has an active subscription for a specific plan.
+ * Uses querySubscriptions which is already RPC-first.
  * @param {string} address - sent1... wallet address
  * @param {number|string} planId - Plan ID to check
  * @param {string} [lcdUrl]
@@ -396,14 +544,28 @@ export async function hasActiveSubscription(address, planId, lcdUrl) {
 
 /**
  * Query allocations for a subscription (who has how many bytes).
- * NOTE: Uses v2 endpoint because this specific v3 query hasn't been implemented yet
- * (returns 501). The v2 path returns the same allocation data. Same situation as /plan/v3/plans/{id}.
+ * RPC-first with LCD fallback. Uses v2 allocation path (v3 returns 501 on chain).
  *
  * @param {string|number|bigint} subscriptionId
  * @param {string} [lcdUrl]
  * @returns {Promise<Array<{ id: string, address: string, grantedBytes: string, utilisedBytes: string }>>}
  */
 export async function querySubscriptionAllocations(subscriptionId, lcdUrl) {
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      const allocs = await rpcQuerySubAllocations(rpc, subscriptionId, { limit: 100 });
+      return allocs.map(a => ({
+        id: a.id,
+        address: a.address,
+        grantedBytes: a.granted_bytes || '0',
+        utilisedBytes: a.utilised_bytes || '0',
+      }));
+    }
+  } catch { /* fall through */ }
+
+  // LCD fallback
   try {
     const data = await lcdQuery(`/sentinel/subscription/v2/subscriptions/${subscriptionId}/allocations`, { lcdUrl });
     return (data.allocations || []).map(a => ({
@@ -419,6 +581,7 @@ export async function querySubscriptionAllocations(subscriptionId, lcdUrl) {
 
 /**
  * Query all subscriptions for a plan. Supports owner filtering.
+ * RPC-first with LCD fallback.
  *
  * @param {number|string} planId - Plan ID
  * @param {object} [opts]
@@ -427,12 +590,30 @@ export async function querySubscriptionAllocations(subscriptionId, lcdUrl) {
  * @returns {Promise<{ subscribers: Array<{ address: string, status: number, id: string }>, total: number|null }>}
  */
 export async function queryPlanSubscribers(planId, opts = {}) {
-  const { items, total } = await lcdQueryAll(
-    `/sentinel/subscription/v3/plans/${planId}/subscriptions`,
-    { lcdUrl: opts.lcdUrl, dataKey: 'subscriptions' },
-  );
+  let items;
+  let total;
+
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      items = await rpcQuerySubscriptionsForPlan(rpc, planId, { limit: 500 });
+      total = items.length;
+    }
+  } catch { /* fall through */ }
+
+  if (!items) {
+    // LCD fallback
+    const result = await lcdQueryAll(
+      `/sentinel/subscription/v3/plans/${planId}/subscriptions`,
+      { lcdUrl: opts.lcdUrl, dataKey: 'subscriptions' },
+    );
+    items = result.items;
+    total = result.total;
+  }
+
   let subscribers = items.map(s => ({
-    address: s.address || s.subscriber,
+    address: s.address || s.acc_address || s.subscriber,
     status: s.status,
     id: s.id || s.base_id,
     ...s,
@@ -466,20 +647,28 @@ export async function getPlanStats(planId, ownerAddress, opts = {}) {
 // ─── v26: Field Experience Helpers ────────────────────────────────────────────
 
 /**
- * Query all nodes linked to a plan.
+ * Query all nodes linked to a plan via RPC (primary) with LCD fallback.
  * @param {number|string} planId
  * @param {string} [lcdUrl]
  * @returns {Promise<{ items: any[], total: number|null }>}
  */
 export async function queryPlanNodes(planId, lcdUrl) {
-  // LCD pagination is BROKEN on this endpoint — count_total returns min(actual, limit)
-  // and next_key is always null. Single high-limit request gets all nodes.
+  // RPC-first
+  try {
+    const rpc = await getRpcClient();
+    if (rpc) {
+      const nodes = await rpcQueryNodesForPlan(rpc, planId, { status: 1, limit: 5000 });
+      return { items: nodes, total: nodes.length };
+    }
+  } catch { /* RPC failed, fall through to LCD */ }
+
+  // LCD fallback — pagination is BROKEN on this endpoint, single high-limit request
   const doQuery = async (baseUrl) => {
     const data = await lcd(baseUrl, `/sentinel/node/v3/plans/${planId}/nodes?pagination.limit=5000`);
     return { items: data.nodes || [], total: (data.nodes || []).length };
   };
   if (lcdUrl) return doQuery(lcdUrl);
-  const { result } = await tryWithFallback(LCD_ENDPOINTS, doQuery, `LCD plan ${planId} nodes`);
+  const { result } = await tryWithFallback(LCD_ENDPOINTS, doQuery, `plan ${planId} nodes`);
   return result;
 }
 

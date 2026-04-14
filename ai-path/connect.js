@@ -34,9 +34,12 @@ import {
   getBalance as sdkGetBalance,
   tryWithFallback,
   RPC_ENDPOINTS,
+  LCD_ENDPOINTS,
+  queryFeeGrant,
   // v1.5.0: RPC queries (protobuf, ~10x faster than LCD for balance checks)
   createRpcQueryClientWithFallback,
   rpcQueryBalance,
+  rpcQueryFeeGrant,
   // v1.5.0: Typed event parsers (replaces string matching for session ID extraction)
   extractSessionIdTyped,
   NodeEventCreateSession,
@@ -192,6 +195,18 @@ function humanError(err) {
     ABORTED: {
       message: 'Connection was cancelled.',
       nextAction: 'none',
+    },
+    FEE_GRANT_NOT_FOUND: {
+      message: 'No fee grant from operator to agent. Operator must provision a grant first.',
+      nextAction: 'request_fee_grant',
+    },
+    FEE_GRANT_EXPIRED: {
+      message: 'Fee grant has expired. Operator must renew the grant.',
+      nextAction: 'request_fee_grant_renewal',
+    },
+    FEE_GRANT_EXHAUSTED: {
+      message: 'Fee grant spend limit exhausted. Operator must top up the grant.',
+      nextAction: 'request_fee_grant_renewal',
     },
   };
 
@@ -363,6 +378,101 @@ export async function connect(opts = {}) {
     log(3, totalSteps, 'BALANCE', `Balance below minimum but fee granter ${opts.feeGranter} covers gas`);
   }
   timings.balance = Date.now() - t0;
+
+  // ── STEP 3.5: Fee Grant Validity Check (when feeGranter is set) ───────────
+  // Verify the fee grant exists on-chain and hasn't expired before attempting
+  // a connection that would fail at broadcast time.
+
+  if (opts.feeGranter) {
+    try {
+      // RPC first (protobuf, ~10x faster), LCD fallback
+      let grant = null;
+      try {
+        const rpcClient = await createRpcQueryClientWithFallback();
+        grant = await rpcQueryFeeGrant(rpcClient, opts.feeGranter, walletAddress);
+      } catch {
+        // RPC failed — fall back to LCD with failover
+        const lcdResult = await tryWithFallback(
+          LCD_ENDPOINTS,
+          async (endpoint) => {
+            const url = endpoint?.url || endpoint;
+            return queryFeeGrant(url, opts.feeGranter, walletAddress);
+          },
+          'fee grant pre-check (LCD fallback)',
+        );
+        grant = lcdResult.result;
+      }
+
+      if (!grant) {
+        const err = new Error(`No fee grant found from ${opts.feeGranter} to ${walletAddress}. Operator must create a fee grant before agent can connect with 0 P2P.`);
+        err.code = 'FEE_GRANT_NOT_FOUND';
+        err.nextAction = 'request_fee_grant';
+        err.details = { granter: opts.feeGranter, grantee: walletAddress };
+        throw err;
+      }
+
+      // Unwrap grant structure: AllowedMsgAllowance > BasicAllowance
+      // Chain returns: { allowance: { "@type": "AllowedMsg...", allowance: { "@type": "Basic...", spend_limit, expiration }, allowed_messages: [...] } }
+      const outerAllowance = grant.allowance || grant;
+      const isAllowedMsg = outerAllowance['@type']?.includes('AllowedMsgAllowance');
+      const inner = isAllowedMsg ? (outerAllowance.allowance || outerAllowance) : outerAllowance;
+      const expiration = inner.expiration || outerAllowance.expiration;
+
+      // Check expiration
+      if (expiration) {
+        const expiresAt = new Date(expiration);
+        const now = new Date();
+        if (expiresAt <= now) {
+          const err = new Error(`Fee grant from ${opts.feeGranter} expired at ${expiresAt.toISOString()}. Operator must renew the fee grant.`);
+          err.code = 'FEE_GRANT_EXPIRED';
+          err.nextAction = 'request_fee_grant_renewal';
+          err.details = { granter: opts.feeGranter, grantee: walletAddress, expiredAt: expiresAt.toISOString() };
+          throw err;
+        }
+
+        const hoursLeft = (expiresAt - now) / 3600000;
+        if (hoursLeft < 1) {
+          log(3, totalSteps, 'FEE_GRANT', `Warning: Fee grant expires in ${Math.round(hoursLeft * 60)} minutes`);
+        } else {
+          log(3, totalSteps, 'FEE_GRANT', `Fee grant valid, expires ${expiresAt.toISOString()} (${Math.round(hoursLeft)}h remaining)`);
+        }
+      } else {
+        log(3, totalSteps, 'FEE_GRANT', 'Fee grant valid (no expiration)');
+      }
+
+      // Check spend_limit — if set, ensure there's enough remaining for at least one TX
+      const spendLimit = inner.spend_limit;
+      if (spendLimit && Array.isArray(spendLimit)) {
+        const udvpnLimit = spendLimit.find(c => c.denom === 'udvpn');
+        if (udvpnLimit) {
+          const remaining = parseInt(udvpnLimit.amount, 10) || 0;
+          if (remaining < 20000) { // 20,000 udvpn = minimum for one session TX
+            const err = new Error(`Fee grant from ${opts.feeGranter} has insufficient spend limit: ${remaining} udvpn remaining (need 20,000 for session TX). Operator must top up the grant.`);
+            err.code = 'FEE_GRANT_EXHAUSTED';
+            err.nextAction = 'request_fee_grant_renewal';
+            err.details = { granter: opts.feeGranter, grantee: walletAddress, remainingUdvpn: remaining };
+            throw err;
+          }
+          log(3, totalSteps, 'FEE_GRANT', `Spend limit: ${remaining} udvpn remaining`);
+        }
+      }
+
+      // Check allowed_messages — verify it includes the messages we need
+      const allowedMessages = isAllowedMsg ? (outerAllowance.allowed_messages || []) : [];
+      if (allowedMessages.length > 0) {
+        const needsStart = allowedMessages.some(m =>
+          m.includes('MsgStartSession') || m.includes('MsgStartSessionRequest'),
+        );
+        if (!needsStart) {
+          log(3, totalSteps, 'FEE_GRANT', `Warning: allowed_messages doesn't include MsgStartSession — TX may fail`);
+        }
+      }
+    } catch (err) {
+      if (err.code === 'FEE_GRANT_NOT_FOUND' || err.code === 'FEE_GRANT_EXPIRED' || err.code === 'FEE_GRANT_EXHAUSTED') throw err;
+      // Non-critical — LCD query failed but fee grant may still work at broadcast time
+      log(3, totalSteps, 'FEE_GRANT', `Could not verify fee grant (${err.message}) — proceeding anyway`);
+    }
+  }
 
   // ── STEP 4/7: Node Selection ──────────────────────────────────────────────
 
@@ -584,11 +694,13 @@ export async function connect(opts = {}) {
     } else if (resolvedNodeAddress) {
       // Direct connection — either user specified nodeAddress or country discovery found one
       sdkOpts.nodeAddress = resolvedNodeAddress;
+      if (opts.feeGranter) sdkOpts.feeGranter = opts.feeGranter;
       result = await connectDirect(sdkOpts);
     } else {
       // No country filter or country discovery found nothing — auto-select globally
       // Use higher maxAttempts to search more nodes
       if (!sdkOpts.maxAttempts) sdkOpts.maxAttempts = 5;
+      if (opts.feeGranter) sdkOpts.feeGranter = opts.feeGranter;
       result = await connectAuto(sdkOpts);
     }
 

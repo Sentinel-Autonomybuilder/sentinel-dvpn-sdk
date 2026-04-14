@@ -6,7 +6,7 @@
 
 import {
   estimateSessionCost,
-  estimateSessionPrice,
+  getNodePrices,
   formatP2P,
   PRICING_REFERENCE,
   DENOM,
@@ -81,11 +81,12 @@ export async function estimateCost(opts = {}) {
   const gb = opts.gigabytes || 1;
   const gasCost = 40000; // ~0.04 P2P per TX
 
-  // If specific node given, get exact price
+  // If specific node given, get exact price via RPC-first node query
   if (opts.nodeAddress) {
     try {
-      const price = await estimateSessionPrice(opts.nodeAddress, gb);
-      const total = price.udvpn || price.amount || 0;
+      const prices = await getNodePrices(opts.nodeAddress);
+      const perGbUdvpn = prices.gigabyte.udvpn || 0;
+      const total = perGbUdvpn * gb;
       const grandTotal = total + gasCost;
 
       const result = {

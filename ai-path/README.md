@@ -191,6 +191,47 @@ const vpn = await connect({
 | `signal` | `AbortSignal` | `null` | AbortController signal for cancellation |
 | `v2rayExePath` | `string` | `auto` | Path to V2Ray binary. Auto-detected from `bin/` |
 
+### Operator-Provisioned Mode (Zero P2P / Fee-Granted)
+
+When an operator (like x402) provisions VPN access for your agent, you don't need P2P tokens. The operator shares their subscription and grants a fee allowance — your agent pays zero gas. Pass `subscriptionId` and `feeGranter` to connect:
+
+```js
+const vpn = await connect({
+  mnemonic: process.env.MNEMONIC,
+  subscriptionId: '12345',                            // Operator's subscription ID
+  feeGranter: 'sent1operatoraddress...',              // Operator's address
+  nodeAddress: 'sentnode1abc...',                     // Plan node
+  fullTunnel: false,  // Recommended for agents
+});
+```
+
+This mode:
+- **Skips balance check** — agent wallet can have 0 P2P
+- **Validates fee grant via RPC** — checks existence, expiration, spend limit, and allowed messages before connecting (~250ms)
+- **Uses fee grant for gas** — operator pays transaction fees (connect AND disconnect)
+- **Connects via existing subscription** — no on-chain subscription creation needed
+- **Crash-safe** — `feeGranter` is persisted to encrypted credentials; crash recovery restores it so disconnect still works
+- **Auto-reconnect aware** — reconnects using same connection mode (subscription/plan), preserving fee grant
+
+| Option | Type | Description |
+|---|---|---|
+| `subscriptionId` | `string\|number` | Operator-provisioned subscription ID |
+| `feeGranter` | `string` | Operator's `sent1...` address (pays gas) |
+| `planId` | `string\|number` | Alternative: subscribe to a plan (creates new subscription) |
+
+**Fee grant pre-check errors** (thrown before connection attempt):
+
+| Error Code | Meaning |
+|---|---|
+| `FEE_GRANT_NOT_FOUND` | No grant from operator to agent on-chain |
+| `FEE_GRANT_EXPIRED` | Grant exists but has expired |
+| `FEE_GRANT_EXHAUSTED` | Grant spend limit too low (< 20,000 udvpn) |
+
+**When to use which:**
+- `subscriptionId` — operator already added you to their subscription (x402 flow)
+- `planId` — operator's plan is open; you subscribe yourself (operator grants gas via feeGranter)
+- Neither — direct pay-per-use with your own P2P tokens (default mode)
+
 ### WARNING: `fullTunnel` and AI Agents
 
 When `fullTunnel: true` (the default), **ALL traffic** routes through the VPN tunnel — including the SDK's own chain queries (LCD, RPC), balance checks, and reconnect logic. On nodes with median speeds (~3 Mbps), this makes chain operations significantly slower and can cause timeouts.
