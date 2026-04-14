@@ -130,7 +130,7 @@ async function connectInternal(opts, paymentStrategy, retryStrategy, state = _de
   try {
     const bal = await getBalance(client, account.address);
     progress(onProgress, logFn, 'wallet', `${account.address} | ${bal.dvpn.toFixed(1)} P2P`);
-    if (!opts.dryRun && bal.udvpn < 100000) {
+    if (!opts.dryRun && !opts.feeGranter && bal.udvpn < 100000) {
       throw new ChainError(ErrorCodes.INSUFFICIENT_BALANCE,
         `Wallet has ${bal.dvpn.toFixed(2)} P2P — need at least 0.1 P2P for a session. Fund address ${account.address} with P2P tokens.`,
         { balance: bal, address: account.address }
@@ -769,8 +769,23 @@ export async function connectViaSubscription(opts) {
     };
 
     checkAborted(signal);
-    progress(null, opts.log || defaultLog, 'session', `Starting session via subscription ${opts.subscriptionId}...`);
-    const result = await broadcastWithInactiveRetry(client, account.address, [msg], opts.log || defaultLog, opts.onProgress);
+
+    // Fee grant: operator pays gas for the agent (e.g., x402 managed plan flow)
+    const feeGranter = opts.feeGranter || null;
+    progress(null, opts.log || defaultLog, 'session', `Starting session via subscription ${opts.subscriptionId}${feeGranter ? ' (fee granted)' : ''}...`);
+
+    let result;
+    if (feeGranter) {
+      try {
+        result = await broadcastWithFeeGrant(client, account.address, [msg], feeGranter);
+      } catch (feeErr) {
+        // Fee grant TX failed — fall back to user-paid
+        progress(null, opts.log || defaultLog, 'session', 'Fee grant failed, paying gas from wallet...');
+        result = await broadcastWithInactiveRetry(client, account.address, [msg], opts.log || defaultLog, opts.onProgress);
+      }
+    } else {
+      result = await broadcastWithInactiveRetry(client, account.address, [msg], opts.log || defaultLog, opts.onProgress);
+    }
     const extracted = extractId(result, /session/i, ['session_id', 'id']);
     if (!extracted) throw new ChainError(ErrorCodes.SESSION_EXTRACT_FAILED, 'Failed to extract session ID from subscription TX result', { txHash: result.transactionHash });
     const sessionId = BigInt(extracted);

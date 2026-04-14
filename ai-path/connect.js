@@ -19,6 +19,8 @@
 import {
   connectAuto,
   connectDirect,
+  connectViaSubscription,
+  connectViaPlan,
   disconnect as sdkDisconnect,
   isConnected,
   getStatus,
@@ -245,6 +247,14 @@ async function preValidateBalance(mnemonic) {
 /**
  * Connect to Sentinel dVPN. The ONE function an AI agent needs.
  *
+ * Three connection modes:
+ *   1. Direct payment — agent pays per-session from own wallet (default)
+ *   2. Subscription — operator provisioned a subscription for this agent
+ *   3. Plan — subscribe to plan + start session (optionally fee-granted)
+ *
+ * For modes 2 & 3, set opts.feeGranter to the operator's address — the
+ * agent can have 0 P2P balance and the operator covers gas.
+ *
  * Every step is logged with numbered phases (STEP 1/7 through STEP 7/7)
  * so an autonomous agent can track progress and diagnose failures.
  *
@@ -254,6 +264,9 @@ async function preValidateBalance(mnemonic) {
  * @param {string} [opts.nodeAddress] - Specific node (sentnode1...). Skips auto-pick.
  * @param {string} [opts.dns] - DNS preset: 'google', 'cloudflare', 'hns'
  * @param {string} [opts.protocol] - Preferred protocol: 'wireguard' or 'v2ray'
+ * @param {string|number} [opts.subscriptionId] - Connect via existing subscription (operator-provisioned)
+ * @param {string|number} [opts.planId] - Connect via plan (subscribes + starts session)
+ * @param {string} [opts.feeGranter] - Operator address that pays gas (sent1...). Skips balance check.
  * @param {function} [opts.onProgress] - Progress callback: (stage, message) => void
  * @param {number} [opts.timeout] - Connection timeout in ms (default: 120000 — 2 minutes)
  * @param {boolean} [opts.silent] - If true, suppress step-by-step console output
@@ -338,12 +351,16 @@ export async function connect(opts = {}) {
   const balCheck = await preValidateBalance(opts.mnemonic);
   log(3, totalSteps, 'BALANCE', `Balance: ${balCheck.p2p} | Sufficient: ${balCheck.sufficient}`);
 
-  if (!balCheck.sufficient && !opts.dryRun) {
+  // Skip balance gate when fee granter is set — agent may have 0 P2P, operator pays gas
+  if (!balCheck.sufficient && !opts.dryRun && !opts.feeGranter) {
     const err = new Error(`Insufficient balance: ${balCheck.p2p}. Need at least ${formatP2P(MIN_BALANCE_UDVPN)}. Fund address: ${walletAddress}`);
     err.code = 'INSUFFICIENT_BALANCE';
     err.nextAction = 'fund_wallet';
     err.details = { address: walletAddress, balance: balCheck.p2p, minimum: formatP2P(MIN_BALANCE_UDVPN) };
     throw err;
+  }
+  if (opts.feeGranter && !balCheck.sufficient) {
+    log(3, totalSteps, 'BALANCE', `Balance below minimum but fee granter ${opts.feeGranter} covers gas`);
   }
   timings.balance = Date.now() - t0;
 
@@ -549,7 +566,22 @@ export async function connect(opts = {}) {
   try {
     let result;
 
-    if (resolvedNodeAddress) {
+    // ── Connection mode: subscription > plan > direct > auto ──────────────
+    if (opts.subscriptionId) {
+      // Subscription mode — operator already provisioned a subscription for this agent
+      log(5, totalSteps, 'SESSION', `Connecting via subscription ${opts.subscriptionId}${opts.feeGranter ? ' (fee granted)' : ''}...`);
+      sdkOpts.subscriptionId = opts.subscriptionId;
+      if (opts.feeGranter) sdkOpts.feeGranter = opts.feeGranter;
+      if (resolvedNodeAddress) sdkOpts.nodeAddress = resolvedNodeAddress;
+      result = await connectViaSubscription(sdkOpts);
+    } else if (opts.planId) {
+      // Plan mode — subscribe to plan + start session (optionally fee-granted)
+      log(5, totalSteps, 'SESSION', `Connecting via plan ${opts.planId}${opts.feeGranter ? ' (fee granted)' : ''}...`);
+      sdkOpts.planId = opts.planId;
+      if (opts.feeGranter) sdkOpts.feeGranter = opts.feeGranter;
+      if (resolvedNodeAddress) sdkOpts.nodeAddress = resolvedNodeAddress;
+      result = await connectViaPlan(sdkOpts);
+    } else if (resolvedNodeAddress) {
       // Direct connection — either user specified nodeAddress or country discovery found one
       sdkOpts.nodeAddress = resolvedNodeAddress;
       result = await connectDirect(sdkOpts);

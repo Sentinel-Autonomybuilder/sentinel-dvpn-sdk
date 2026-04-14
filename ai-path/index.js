@@ -65,10 +65,15 @@ export {
   subscribeToPlan,
   hasActiveSubscription,
   querySubscriptions,
+  querySubscriptionAllocations,
   queryPlanNodes,
   queryFeeGrants,
   buildFeeGrantMsg,
   broadcastWithFeeGrant,
+  // v2.1.0: Subscription sharing + onboarding (operator provisions agent access)
+  shareSubscription,
+  shareSubscriptionWithFeeGrant,
+  onboardPlanUser,
   rpcQueryNodesForPlan,
   rpcQuerySubscriptionsForAccount,
 } from '../index.js';

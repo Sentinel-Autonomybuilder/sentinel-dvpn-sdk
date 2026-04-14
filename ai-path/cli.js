@@ -125,6 +125,9 @@ function showHelp() {
   console.log(`  --protocol <type>   Protocol: wireguard or v2ray`);
   console.log(`  --dns <preset>      DNS: google, cloudflare, or hns (Handshake)`);
   console.log(`  --node <address>    Connect to specific node (sentnode1...)`);
+  console.log(`  --subscription <id> Connect via operator-provisioned subscription`);
+  console.log(`  --plan <id>         Connect via plan (subscribe + start session)`);
+  console.log(`  --fee-granter <addr> Operator address that pays gas (sent1...)`);
   console.log('');
   console.log(`${c.bold}NODES OPTIONS${c.reset}`);
   console.log(`  --country <code>    Filter by country`);
@@ -142,6 +145,10 @@ function showHelp() {
   console.log(`  sentinel-ai connect`);
   console.log(`  sentinel-ai connect --country DE --protocol wireguard`);
   console.log(`  sentinel-ai connect --node sentnode1abc...`);
+  console.log('');
+  console.log(`  ${c.dim}# Connect via subscription (operator-provisioned, zero P2P needed)${c.reset}`);
+  console.log(`  sentinel-ai connect --subscription 1165072 --fee-granter sent1operator...`);
+  console.log(`  sentinel-ai connect --plan 42 --fee-granter sent1operator...`);
   console.log('');
   console.log(`  ${c.dim}# List nodes${c.reset}`);
   console.log(`  sentinel-ai nodes --country US --limit 10`);
@@ -295,12 +302,18 @@ async function cmdConnect(flags) {
   if (flags.protocol) opts.protocol = flags.protocol;
   if (flags.dns) opts.dns = flags.dns;
   if (flags.node) opts.nodeAddress = flags.node;
+  if (flags.subscription) opts.subscriptionId = flags.subscription;
+  if (flags.plan) opts.planId = flags.plan;
+  if (flags['fee-granter']) opts.feeGranter = flags['fee-granter'];
 
   console.log(`${info} Connecting to Sentinel dVPN...`);
   if (flags.country) console.log(`  Country:  ${c.cyan}${flags.country}${c.reset}`);
   if (flags.protocol) console.log(`  Protocol: ${c.cyan}${flags.protocol}${c.reset}`);
   if (flags.dns) console.log(`  DNS:      ${c.cyan}${flags.dns}${c.reset}`);
   if (flags.node) console.log(`  Node:     ${c.cyan}${flags.node}${c.reset}`);
+  if (flags.subscription) console.log(`  Subscription: ${c.cyan}${flags.subscription}${c.reset}`);
+  if (flags.plan) console.log(`  Plan:     ${c.cyan}${flags.plan}${c.reset}`);
+  if (flags['fee-granter']) console.log(`  Fee granter: ${c.cyan}${flags['fee-granter']}${c.reset}`);
   console.log('');
 
   const { connect, disconnect } = await import('./index.js');
