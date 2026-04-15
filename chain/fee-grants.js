@@ -13,7 +13,7 @@ import { EventEmitter } from 'events';
 import { protoString, protoInt64, protoEmbedded } from '../v3protocol.js';
 import { LCD_ENDPOINTS } from '../defaults.js';
 import { ValidationError, ErrorCodes } from '../errors.js';
-import { lcd, lcdPaginatedSafe, lcdQueryAll } from './lcd.js';
+import { lcdQuery, lcdPaginatedSafe } from './lcd.js';
 import { isSameKey } from './wallet.js';
 import { queryPlanSubscribers } from './queries.js';
 import {
@@ -178,9 +178,9 @@ export async function queryFeeGrant(lcdUrl, granter, grantee) {
     }
   } catch { /* fall through to LCD */ }
 
-  // LCD fallback
+  // LCD fallback (with endpoint failover via lcdQuery)
   try {
-    const data = await lcd(lcdUrl, `/cosmos/feegrant/v1beta1/allowance/${granter}/${grantee}`);
+    const data = await lcdQuery(`/cosmos/feegrant/v1beta1/allowance/${granter}/${grantee}`, { lcdUrl });
     return data.allowance || null;
   } catch { return null; } // 404 = no grant
 }

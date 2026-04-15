@@ -39,7 +39,10 @@ import {
 
 import {
   findExistingSession, fetchActiveNodes, queryNode, resolveNodeUrl,
+  resetQueryRpcCache,
 } from './chain/queries.js';
+
+import { disconnectRpc } from './chain/rpc.js';
 
 import {
   nodeStatusV3, generateWgKeyPair, initHandshakeV3,
@@ -389,7 +392,7 @@ export function clearSystemProxy(state) {
 // ─── Query Nodes ─────────────────────────────────────────────────────────────
 
 /**
- * Fetch active nodes from LCD and check which are actually online.
+ * Fetch active nodes via RPC-first (LCD fallback) and check which are actually online.
  * Returns array sorted by quality score (best first).
  *
  * Built-in quality scoring (from 400+ node tests):
@@ -445,12 +448,12 @@ async function _queryOnlineNodesImpl(options = {}) {
   const logFn = options.log || null;
   const brokenAddrs = new Set(BROKEN_NODES.map(n => n.address));
 
-  // 1. Fetch ALL active nodes from LCD — uses lcdPaginatedSafe (handles broken pagination)
+  // 1. Fetch ALL active nodes via RPC-first (falls back to LCD if RPC fails)
   let nodes = [];
   if (options.lcdUrl) {
     nodes = await fetchActiveNodes(options.lcdUrl);
   } else {
-    const { result } = await tryWithFallback(LCD_ENDPOINTS, fetchActiveNodes, 'LCD node list');
+    const { result } = await tryWithFallback(LCD_ENDPOINTS, fetchActiveNodes, 'RPC-first node list');
     nodes = result;
   }
 
@@ -520,12 +523,12 @@ async function _queryOnlineNodesImpl(options = {}) {
   return online;
 }
 
-// ─── Full Node Catalog (LCD only, no per-node status checks) ────────────────
+// ─── Full Node Catalog (RPC-first, no per-node status checks) ───────────────
 
 /**
- * Fetch ALL active nodes from the LCD. No per-node HTTP checks — instant.
+ * Fetch ALL active nodes via RPC-first (LCD fallback). No per-node HTTP checks — instant.
  *
- * Returns every node that accepts udvpn, with LCD data only:
+ * Returns every node that accepts udvpn, with chain data:
  * address, remote_url, gigabyte_prices, hourly_prices.
  *
  * Use this for: building node lists/maps, country pickers, price comparisons.
@@ -543,7 +546,7 @@ export async function fetchAllNodes(options = {}) {
     const { result } = await tryWithFallback(
       LCD_ENDPOINTS,
       async (url) => fetchActiveNodes(url),
-      'LCD full node list',
+      'RPC-first full node list',
     );
     nodes = result;
   }
@@ -601,9 +604,9 @@ export function buildNodeIndex(nodes) {
 }
 
 /**
- * Enrich LCD nodes with type/country/city by probing each node's status API.
+ * Enrich chain nodes with type/country/city by probing each node's status API.
  *
- * @param {Array} nodes - Raw LCD nodes from fetchAllNodes()
+ * @param {Array} nodes - Raw chain nodes from fetchAllNodes()
  * @param {object} [options]
  * @param {number} [options.concurrency=30] - Parallel probes
  * @param {function} [options.onProgress] - Callback: ({ total, done, enriched }) => void
@@ -2436,15 +2439,17 @@ export function registerCleanupHandlers() {
   if (orphans?.cleaned?.length) console.log('[sentinel-sdk] Recovered orphans:', orphans.cleaned.join(', '));
   emergencyCleanupSync(); // kill stale tunnels from previous crash
   killOrphanV2Ray(); // kill orphaned v2ray from previous crash
-  process.on('exit', () => { if (_killSwitchEnabled) disableKillSwitch(); clearSystemProxy(); killOrphanV2Ray(); emergencyCleanupSync(); });
-  process.on('SIGINT', () => { if (_killSwitchEnabled) disableKillSwitch(); clearSystemProxy(); killOrphanV2Ray(); emergencyCleanupSync(); process.exit(130); });
-  process.on('SIGTERM', () => { if (_killSwitchEnabled) disableKillSwitch(); clearSystemProxy(); killOrphanV2Ray(); emergencyCleanupSync(); process.exit(143); });
+  process.on('exit', () => { if (_killSwitchEnabled) disableKillSwitch(); clearSystemProxy(); killOrphanV2Ray(); emergencyCleanupSync(); resetQueryRpcCache(); disconnectRpc(); });
+  process.on('SIGINT', () => { if (_killSwitchEnabled) disableKillSwitch(); clearSystemProxy(); killOrphanV2Ray(); emergencyCleanupSync(); resetQueryRpcCache(); disconnectRpc(); process.exit(130); });
+  process.on('SIGTERM', () => { if (_killSwitchEnabled) disableKillSwitch(); clearSystemProxy(); killOrphanV2Ray(); emergencyCleanupSync(); resetQueryRpcCache(); disconnectRpc(); process.exit(143); });
   process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err);
     if (_killSwitchEnabled) disableKillSwitch();
     clearSystemProxy();
     killOrphanV2Ray();
     emergencyCleanupSync();
+    resetQueryRpcCache();
+    disconnectRpc();
     process.exit(1);
   });
 }

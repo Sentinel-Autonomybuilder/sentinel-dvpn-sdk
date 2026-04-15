@@ -11,7 +11,6 @@
 
 import { protoString, protoEmbedded, protoInt64 } from '../v3protocol.js';
 import { ChainError, ErrorCodes } from '../errors.js';
-import { lcd, lcdPaginatedSafe } from './lcd.js';
 import { buildRegistry } from './client.js';
 
 // ─── Protobuf Helpers ───────────────────────────────────────────────────────
@@ -99,11 +98,4 @@ export function encodeForExec(msgs) {
   });
 }
 
-/**
- * Query authz grants between granter and grantee.
- * @returns {Promise<Array>} Array of grant objects
- */
-export async function queryAuthzGrants(lcdUrl, granter, grantee) {
-  const { items } = await lcdPaginatedSafe(lcdUrl, `/cosmos/authz/v1beta1/grants?granter=${granter}&grantee=${grantee}`, 'grants');
-  return items;
-}
+// queryAuthzGrants removed — use RPC-first version from chain/queries.js

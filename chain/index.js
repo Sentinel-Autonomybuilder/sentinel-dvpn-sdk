@@ -50,6 +50,19 @@ import { publicEndpointAgent } from '../security/index.js';
 // Wallet — validation helpers (used by chain functions that validate addresses)
 import { validateMnemonic, validateAddress } from '../wallet/index.js';
 
+// RPC-first query modules — delegates LCD-only functions to these
+import {
+  findExistingSession as _rpcFindExistingSession,
+  fetchActiveNodes as _rpcFetchActiveNodes,
+  getNetworkOverview as _rpcGetNetworkOverview,
+  getNodePrices as _rpcGetNodePrices,
+  discoverPlanIds as _rpcDiscoverPlanIds,
+} from './queries.js';
+import {
+  queryFeeGrants as _rpcQueryFeeGrants,
+  queryFeeGrant as _rpcQueryFeeGrant,
+} from './fee-grants.js';
+
 // ─── All Type URL Constants ──────────────────────────────────────────────────
 
 export const MSG_TYPES = {
@@ -345,19 +358,10 @@ export function txResponse(result) {
 /**
  * Find an existing active session for a wallet+node pair.
  * Returns session ID (BigInt) or null. Use this to avoid double-paying.
- *
- * Note: Sessions have a nested base_session object containing the actual data.
+ * Delegates to chain/queries.js RPC-first implementation.
  */
 export async function findExistingSession(lcdUrl, walletAddr, nodeAddr) {
-  const data = await lcd(lcdUrl, `/sentinel/session/v3/sessions?address=${walletAddr}&status=1&pagination.limit=100`);
-  for (const s of (data.sessions || [])) {
-    const bs = s.base_session || s; // session data is nested in base_session
-    if (bs.node_address !== nodeAddr) continue;
-    const maxBytes = parseInt(bs.max_bytes || '0');
-    const used = parseInt(bs.download_bytes || '0') + parseInt(bs.upload_bytes || '0');
-    if (maxBytes === 0 || used < maxBytes) return BigInt(bs.id);
-  }
-  return null;
+  return _rpcFindExistingSession(lcdUrl, walletAddr, nodeAddr);
 }
 
 /**
@@ -377,176 +381,44 @@ export function resolveNodeUrl(node) {
 }
 
 /**
- * Fetch all active nodes from LCD with pagination.
+ * Fetch all active nodes with RPC-first + LCD fallback.
  * Returns array of node objects. Each node has `remote_url` resolved from `remote_addrs`.
+ * Delegates to chain/queries.js RPC-first implementation.
  */
 export async function fetchActiveNodes(lcdUrl, limit = 500, maxPages = 20) {
-  const nodes = [];
-  let nextKey = null;
-  let page = 0;
-  do {
-    const keyParam = nextKey ? `&pagination.key=${encodeURIComponent(nextKey)}` : '';
-    const data = await lcd(lcdUrl, `/sentinel/node/v3/nodes?status=1&pagination.limit=${limit}${keyParam}`);
-    nodes.push(...(data.nodes || []));
-    nextKey = data.pagination?.next_key || null;
-    page++;
-  } while (nextKey && page < maxPages);
-  // Add computed remote_url for backward compatibility
-  for (const n of nodes) {
-    try { n.remote_url = resolveNodeUrl(n); } catch { /* skip nodes with no address */ }
-  }
-  return nodes;
+  return _rpcFetchActiveNodes(lcdUrl, limit, maxPages);
 }
 
 /**
  * Get a quick network overview — total nodes, counts by country and service type, average prices.
- * Perfect for dashboard UIs, onboarding screens, and network health displays.
+ * Delegates to chain/queries.js RPC-first implementation.
  *
  * @param {string} [lcdUrl] - LCD endpoint (default: cascading fallback)
  * @returns {Promise<{ totalNodes: number, byCountry: Array<{country: string, count: number}>, byType: {wireguard: number, v2ray: number, unknown: number}, averagePrice: {gigabyteDvpn: number, hourlyDvpn: number}, nodes: Array }>}
- *
- * @example
- *   const overview = await getNetworkOverview();
- *   console.log(`${overview.totalNodes} nodes across ${overview.byCountry.length} countries`);
- *   console.log(`Average: ${overview.averagePrice.gigabyteDvpn.toFixed(3)} P2P/GB`);
  */
 export async function getNetworkOverview(lcdUrl) {
-  const fetchFn = async (url) => fetchActiveNodes(url);
-  let nodes;
-  if (lcdUrl) {
-    nodes = await fetchFn(lcdUrl);
-  } else {
-    const result = await tryWithFallback(LCD_ENDPOINTS, fetchFn, 'getNetworkOverview');
-    nodes = result.result;
-  }
-
-  // Filter to nodes that accept udvpn
-  const active = nodes.filter(n => n.remote_url && (n.gigabyte_prices || []).some(p => p.denom === 'udvpn'));
-
-  // Count by country (from LCD metadata, limited — enrichNodes gives better data)
-  const countryMap = {};
-  for (const n of active) {
-    const c = n.location?.country || n.country || 'Unknown';
-    countryMap[c] = (countryMap[c] || 0) + 1;
-  }
-  const byCountry = Object.entries(countryMap)
-    .map(([country, count]) => ({ country, count }))
-    .sort((a, b) => b.count - a.count);
-
-  // Count by type (type not in LCD — estimate from service_type field if present)
-  const byType = { wireguard: 0, v2ray: 0, unknown: 0 };
-  for (const n of active) {
-    const t = n.service_type || n.type;
-    if (t === 'wireguard' || t === 1) byType.wireguard++;
-    else if (t === 'v2ray' || t === 2) byType.v2ray++;
-    else byType.unknown++;
-  }
-
-  // Average prices
-  let gbTotal = 0, gbCount = 0, hrTotal = 0, hrCount = 0;
-  for (const n of active) {
-    const gb = (n.gigabyte_prices || []).find(p => p.denom === 'udvpn');
-    if (gb?.quote_value) { gbTotal += parseInt(gb.quote_value, 10); gbCount++; }
-    const hr = (n.hourly_prices || []).find(p => p.denom === 'udvpn');
-    if (hr?.quote_value) { hrTotal += parseInt(hr.quote_value, 10); hrCount++; }
-  }
-
-  return {
-    totalNodes: active.length,
-    byCountry,
-    byType,
-    averagePrice: {
-      gigabyteDvpn: gbCount > 0 ? (gbTotal / gbCount) / 1_000_000 : 0,
-      hourlyDvpn: hrCount > 0 ? (hrTotal / hrCount) / 1_000_000 : 0,
-    },
-    nodes: active,
-  };
+  return _rpcGetNetworkOverview(lcdUrl);
 }
 
 /**
  * Discover plan IDs by probing subscription endpoints.
- * Workaround for /sentinel/plan/v3/plans returning 501 Not Implemented.
+ * Delegates to chain/queries.js RPC-first implementation.
  * Returns sorted array of plan IDs that have at least 1 subscription.
  */
 export async function discoverPlanIds(lcdUrl, maxId = 100) {
-  const ids = [];
-  const batchSize = 10;
-  for (let batch = 0; batch < maxId / batchSize; batch++) {
-    const checks = [];
-    for (let i = batch * batchSize + 1; i <= (batch + 1) * batchSize; i++) {
-      checks.push(
-        lcd(lcdUrl, `/sentinel/subscription/v3/plans/${i}/subscriptions?pagination.limit=1&pagination.count_total=true`)
-          .then(d => { if (parseInt(d.pagination?.total || '0') > 0) ids.push(i); })
-          .catch(() => {})
-      );
-    }
-    await Promise.all(checks);
-  }
-  return ids.sort((a, b) => a - b);
+  return _rpcDiscoverPlanIds(lcdUrl, maxId);
 }
 
 /**
- * Get standardized prices for a node — abstracts V3 LCD price parsing entirely.
- *
- * Solves the common "NaN / GB" problem by defensively extracting quote_value,
- * base_value, or amount from the nested LCD response structure.
+ * Get standardized prices for a node — abstracts V3 price parsing entirely.
+ * Delegates to chain/queries.js RPC-first implementation (direct node lookup, not full-list scan).
  *
  * @param {string} nodeAddress - sentnode1... address
  * @param {string} [lcdUrl] - LCD endpoint URL (default: cascading fallback across all endpoints)
  * @returns {Promise<{ gigabyte: { dvpn: number, udvpn: number, raw: object|null }, hourly: { dvpn: number, udvpn: number, raw: object|null }, denom: string, nodeAddress: string }>}
- *
- * @example
- *   const prices = await getNodePrices('sentnode1abc...');
- *   console.log(`${prices.gigabyte.dvpn} P2P/GB, ${prices.hourly.dvpn} P2P/hr`);
- *   // Use prices.gigabyte.raw for the full { denom, base_value, quote_value } object
- *   // needed by encodeMsgStartSession's max_price field.
  */
 export async function getNodePrices(nodeAddress, lcdUrl) {
-  if (typeof nodeAddress !== 'string' || !/^sentnode1[a-z0-9]{38}$/.test(nodeAddress)) {
-    throw new ValidationError(ErrorCodes.INVALID_NODE_ADDRESS, 'nodeAddress must be a valid sentnode1... bech32 address (46 characters)', { value: nodeAddress });
-  }
-
-  const fetchNode = async (baseUrl) => {
-    let nextKey = null;
-    let pages = 0;
-    do {
-      const keyParam = nextKey ? `&pagination.key=${encodeURIComponent(nextKey)}` : '';
-      const data = await lcd(baseUrl, `/sentinel/node/v3/nodes?status=1&pagination.limit=500${keyParam}`);
-      const nodes = data.nodes || [];
-      const found = nodes.find(n => n.address === nodeAddress);
-      if (found) return found;
-      nextKey = data.pagination?.next_key || null;
-      pages++;
-    } while (nextKey && pages < 20);
-    return null;
-  };
-
-  let node;
-  if (lcdUrl) {
-    node = await fetchNode(lcdUrl);
-  } else {
-    const result = await tryWithFallback(LCD_ENDPOINTS, fetchNode, 'getNodePrices');
-    node = result.result;
-  }
-
-  if (!node) throw new NodeError(ErrorCodes.NODE_NOT_FOUND, `Node ${nodeAddress} not found on LCD (may be inactive or deregistered)`, { nodeAddress });
-
-  function extractPrice(priceArray) {
-    if (!Array.isArray(priceArray)) return { dvpn: 0, udvpn: 0, raw: null };
-    const entry = priceArray.find(p => p.denom === 'udvpn');
-    if (!entry) return { dvpn: 0, udvpn: 0, raw: null };
-    // Defensive fallback chain: quote_value (V3 current) -> base_value -> amount (legacy)
-    const rawVal = entry.quote_value || entry.base_value || entry.amount || '0';
-    const udvpn = parseInt(rawVal, 10) || 0;
-    return { dvpn: parseFloat((udvpn / 1_000_000).toFixed(6)), udvpn, raw: entry };
-  }
-
-  return {
-    gigabyte: extractPrice(node.gigabyte_prices),
-    hourly: extractPrice(node.hourly_prices),
-    denom: 'P2P',
-    nodeAddress,
-  };
+  return _rpcGetNodePrices(nodeAddress, lcdUrl);
 }
 
 // ─── Display & Serialization Helpers ────────────────────────────────────────
@@ -761,22 +633,20 @@ export function buildRevokeFeeGrantMsg(granter, grantee) {
 
 /**
  * Query fee grants given to a grantee.
+ * Delegates to chain/fee-grants.js RPC-first implementation.
  * @returns {Promise<Array>} Array of allowance objects
  */
 export async function queryFeeGrants(lcdUrl, grantee) {
-  const data = await lcd(lcdUrl, `/cosmos/feegrant/v1beta1/allowances/${grantee}`);
-  return data.allowances || [];
+  return _rpcQueryFeeGrants(lcdUrl, grantee);
 }
 
 /**
  * Query a specific fee grant between granter and grantee.
+ * Delegates to chain/fee-grants.js RPC-first implementation.
  * @returns {Promise<object|null>} Allowance object or null
  */
 export async function queryFeeGrant(lcdUrl, granter, grantee) {
-  try {
-    const data = await lcd(lcdUrl, `/cosmos/feegrant/v1beta1/allowance/${granter}/${grantee}`);
-    return data.allowance || null;
-  } catch { return null; } // 404 = no grant
+  return _rpcQueryFeeGrant(lcdUrl, granter, grantee);
 }
 
 /**
@@ -878,14 +748,7 @@ export function encodeForExec(msgs) {
   });
 }
 
-/**
- * Query authz grants between granter and grantee.
- * @returns {Promise<Array>} Array of grant objects
- */
-export async function queryAuthzGrants(lcdUrl, granter, grantee) {
-  const data = await lcd(lcdUrl, `/cosmos/authz/v1beta1/grants?granter=${granter}&grantee=${grantee}`);
-  return data.grants || [];
-}
+// queryAuthzGrants removed — use RPC-first version from chain/queries.js
 
 // Re-export extractSessionId for convenience (from protocol module)
 export { extractSessionId };

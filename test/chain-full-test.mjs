@@ -150,22 +150,21 @@ async function run() {
     }
   }
 
-  // ── Section 3: LCD Queries (fallback layer) ─────────────────────────────
-  console.log('\n─── 3. LCD Queries ───');
+  // ── Section 3: RPC Queries (primary layer) ─────────────────────────────
+  console.log('\n─── 3. RPC Queries ───');
 
   try {
     const overview = await SDK.getNetworkOverview();
     ok('getNetworkOverview', `${overview.activeNodes} active nodes, ${overview.plans} plans`);
   } catch (e) { fail('getNetworkOverview', e); }
 
-  // LCD balance via direct axios (lcdQuery wrapper uses internal failover)
+  // RPC balance via SDK (was: direct LCD axios call)
   try {
-    const { default: axios } = await import('axios');
-    const lcdUrl = SDK.LCD_ENDPOINTS[0]?.url || SDK.DEFAULT_LCD;
-    const r = await axios.get(`${lcdUrl}/cosmos/bank/v1beta1/balances/${address}`, { timeout: 10000 });
-    const udvpn = r.data?.balances?.find(b => b.denom === 'udvpn')?.amount || '0';
-    ok('LCD balance (direct)', `${SDK.formatP2P(Number(udvpn))}`);
-  } catch (e) { fail('LCD balance (direct)', e); }
+    const rpcClient = await SDK.createRpcQueryClientWithFallback();
+    const bal = await SDK.rpcQueryBalance(rpcClient, address, 'udvpn');
+    const udvpn = bal?.amount || '0';
+    ok('RPC balance', `${SDK.formatP2P(Number(udvpn))}`);
+  } catch (e) { fail('RPC balance', e); }
 
   try {
     const hasSub = await SDK.hasActiveSubscription(address);
@@ -173,10 +172,9 @@ async function run() {
   } catch (e) { fail('hasActiveSubscription', e); }
 
   try {
-    const lcdUrl = SDK.LCD_ENDPOINTS[0]?.url || SDK.LCD_ENDPOINTS[0] || SDK.DEFAULT_LCD;
-    const subs = await SDK.querySubscriptions(lcdUrl, address);
-    ok('querySubscriptions (LCD)', `${subs?.length || 0} subs`);
-  } catch (e) { fail('querySubscriptions (LCD)', e); }
+    const subs = await SDK.querySubscriptions(null, address);
+    ok('querySubscriptions (RPC-first)', `${subs?.length || 0} subs`);
+  } catch (e) { fail('querySubscriptions (RPC-first)', e); }
 
   // ── Section 4: Node Discovery & Pricing ─────────────────────────────────
   console.log('\n─── 4. Node Discovery & Pricing ───');

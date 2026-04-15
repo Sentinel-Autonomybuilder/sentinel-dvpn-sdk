@@ -25,7 +25,7 @@
  */
 
 import { ChainError, ErrorCodes } from './errors.js';
-import { sleep } from './defaults.js';
+import { sleep, DEFAULT_LCD } from './defaults.js';
 import {
   broadcast,
   extractAllSessionIds,
@@ -246,7 +246,7 @@ async function _processBatch(client, account, batch, gigabytes, denom, ctx) {
 export async function waitForBatchSessions(nodeAddrs, walletAddr, lcdUrl, options = {}) {
   const maxWaitMs = options.maxWaitMs ?? DEFAULT_POLL_TIMEOUT;
   const pollIntervalMs = options.pollIntervalMs ?? 2000;
-  const baseLcd = lcdUrl || 'https://lcd.sentinel.co';
+  const baseLcd = lcdUrl || DEFAULT_LCD;
 
   if (nodeAddrs.length === 0) return { confirmed: [], pending: [] };
 

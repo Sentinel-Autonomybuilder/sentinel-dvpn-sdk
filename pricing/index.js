@@ -11,8 +11,7 @@
  *   console.log(formatDvpn(prices.gigabyte.udvpn)); // "0.04 P2P"
  */
 
-import { lcd } from '../chain/index.js';
-import { fetchActiveNodes } from '../chain/index.js';
+import { queryNode, fetchActiveNodes } from '../chain/queries.js';
 import { LCD_ENDPOINTS, tryWithFallback } from '../config/index.js';
 import { ValidationError, NodeError, ErrorCodes } from '../errors/index.js';
 
@@ -39,30 +38,8 @@ export async function getNodePrices(nodeAddress, lcdUrl) {
     throw new ValidationError(ErrorCodes.INVALID_NODE_ADDRESS, 'nodeAddress must be a valid sentnode1... bech32 address (46 characters)', { value: nodeAddress });
   }
 
-  const fetchNode = async (baseUrl) => {
-    let nextKey = null;
-    let pages = 0;
-    do {
-      const keyParam = nextKey ? `&pagination.key=${encodeURIComponent(nextKey)}` : '';
-      const data = await lcd(baseUrl, `/sentinel/node/v3/nodes?status=1&pagination.limit=500${keyParam}`);
-      const nodes = data.nodes || [];
-      const found = nodes.find(n => n.address === nodeAddress);
-      if (found) return found;
-      nextKey = data.pagination?.next_key || null;
-      pages++;
-    } while (nextKey && pages < 20);
-    return null;
-  };
-
-  let node;
-  if (lcdUrl) {
-    node = await fetchNode(lcdUrl);
-  } else {
-    const result = await tryWithFallback(LCD_ENDPOINTS, fetchNode, 'getNodePrices');
-    node = result.result;
-  }
-
-  if (!node) throw new NodeError(ErrorCodes.NODE_NOT_FOUND, `Node ${nodeAddress} not found on LCD (may be inactive or deregistered)`, { nodeAddress });
+  // RPC-first single node lookup (was: paginating ALL nodes via LCD)
+  const node = await queryNode(nodeAddress, { lcdUrl });
 
   function extractPrice(priceArray) {
     if (!Array.isArray(priceArray)) return { dvpn: 0, udvpn: 0, raw: null };

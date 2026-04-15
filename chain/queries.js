@@ -56,6 +56,15 @@ async function getRpcClient() {
   return _rpcClientPromise;
 }
 
+/**
+ * Clear the cached RPC query client. Called during process cleanup
+ * to ensure WebSocket connections are properly closed.
+ */
+export function resetQueryRpcCache() {
+  _rpcClient = null;
+  _rpcClientPromise = null;
+}
+
 // ─── Query Helpers ───────────────────────────────────────────────────────────
 
 /**
@@ -344,9 +353,9 @@ export async function querySessionById(lcdUrl, sessionId) {
     }
   } catch { /* fall through to LCD */ }
 
-  // LCD fallback
+  // LCD fallback (with endpoint failover via lcdQuery)
   try {
-    const data = await lcd(lcdUrl, `/sentinel/session/v3/sessions/${sessionId}`);
+    const data = await lcdQuery(`/sentinel/session/v3/sessions/${sessionId}`, { lcdUrl });
     const raw = data?.session;
     if (!raw) return null;
     return flattenSession(raw);
@@ -372,9 +381,9 @@ export async function querySessionAllocation(lcdUrl, sessionId) {
   } catch { /* fall through */ }
 
   if (!s) {
-    // LCD fallback
+    // LCD fallback (with endpoint failover via lcdQuery)
     try {
-      const data = await lcd(lcdUrl, `/sentinel/session/v3/sessions/${sessionId}`);
+      const data = await lcdQuery(`/sentinel/session/v3/sessions/${sessionId}`, { lcdUrl });
       s = data.session?.base_session || data.session || null;
     } catch { return null; }
   }

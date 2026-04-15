@@ -25,7 +25,7 @@ axios.defaults.adapter = 'http';
 // This is the npm/semver version for consumers. Internal development iterations
 // (v20, v21, v22, etc.) track feature milestones and are not exposed as exports.
 
-export const SDK_VERSION = '2.3.0';
+export const SDK_VERSION = '2.4.0';
 
 // ─── Timestamps ──────────────────────────────────────────────────────────────
 

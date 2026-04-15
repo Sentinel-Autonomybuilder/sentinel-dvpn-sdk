@@ -33,9 +33,7 @@ import {
   events as sdkEvents, ConnectionState,
 } from '../connection/index.js';
 import {
-  createWallet, privKeyFromMnemonic, createClient, broadcast,
-  createSafeBroadcaster, getBalance, findExistingSession, fetchActiveNodes,
-  discoverPlanIds, resolveNodeUrl, lcd, MSG_TYPES,
+  createWallet, createClient, getBalance,
 } from '../chain/index.js';
 import { nodeStatusV3 } from '../protocol/index.js';
 import { createNodeHttpsAgent, clearKnownNode, clearAllKnownNodes, getKnownNode } from '../security/index.js';
