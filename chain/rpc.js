@@ -402,11 +402,17 @@ function decodeAllocation(fields) {
 /**
  * Query active nodes via RPC.
  *
+ * NOTE ON PAGINATION: Sentinel v3's `QueryNodes` truncates at the requested
+ * `limit` and does NOT emit `pagination.next_key`. A standard Cosmos
+ * "loop while next_key is non-empty" pattern terminates on the first call
+ * and silently loses data. Request above the chain's current hard ceiling
+ * (~1048 active nodes as of 2026-04). Default raised to 10000.
+ *
  * @param {{ queryClient: QueryClient }} client - From createRpcQueryClient()
  * @param {{ status?: number, limit?: number }} [opts]
  * @returns {Promise<Array<{ address: string, gigabyte_prices: Array, hourly_prices: Array, remote_addrs: string[], status: number }>>}
  */
-export async function rpcQueryNodes(client, { status = 1, limit = 500 } = {}) {
+export async function rpcQueryNodes(client, { status = 1, limit = 10000 } = {}) {
   const path = '/sentinel.node.v3.QueryService/QueryNodes';
   const request = concat([
     encodeEnum(1, status),                                        // status field
@@ -446,12 +452,18 @@ export async function rpcQueryNode(client, address) {
 /**
  * Query nodes linked to a plan via RPC.
  *
+ * NOTE ON PAGINATION: `QueryNodesForPlan` silently truncates at the requested
+ * `limit` with no `next_key`. Observed 2026-04: plan 36 has 803 active nodes
+ * but `limit=500` returns exactly 500 with no indication more exist. Default
+ * raised to 10000. If a plan grows beyond that, raise further — the chain's
+ * own ceiling is the effective limit.
+ *
  * @param {{ queryClient: QueryClient }} client
  * @param {number|bigint} planId
  * @param {{ status?: number, limit?: number }} [opts]
  * @returns {Promise<Array>}
  */
-export async function rpcQueryNodesForPlan(client, planId, { status = 1, limit = 500 } = {}) {
+export async function rpcQueryNodesForPlan(client, planId, { status = 1, limit = 10000 } = {}) {
   const path = '/sentinel.node.v3.QueryService/QueryNodesForPlan';
   const request = concat([
     encodeUint64(1, planId),                                     // id
@@ -889,6 +901,50 @@ export async function rpcQueryProvider(client, provAddress) {
   } catch {
     return null;
   }
+}
+
+// ─── TX Hash Lookup ─────────────────────────────────────────────────────────
+
+/**
+ * Fetch a transaction by hash via Tendermint RPC.
+ * Accepts bare hex (64 chars) or 0x-prefixed hex. Returns a normalized shape
+ * matching the LCD cosmos/tx/v1beta1/txs/{hash} response so callers don't
+ * need to handle both formats.
+ *
+ * @param {import('@cosmjs/tendermint-rpc').Tendermint37Client} tmClient - From createRpcQueryClient().tmClient
+ * @param {string} txHash - TX hash as hex string (bare or 0x-prefixed)
+ * @returns {Promise<{ hash: string, height: number, code: number, rawLog: string, events: Array<{ type: string, attributes: Array<{ key: string, value: string }> }>, gasUsed: string, gasWanted: string }>}
+ * @throws {Error} If the transaction is not found or RPC call fails
+ */
+export async function rpcGetTxByHash(tmClient, txHash) {
+  // Strip optional 0x prefix and normalise to upper-case for consistency
+  const hex = txHash.replace(/^0x/i, '').toUpperCase();
+  // Decode hex string → Uint8Array
+  const hashBytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    hashBytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  }
+
+  const response = await tmClient.tx({ hash: hashBytes });
+
+  // Normalise events: TxData.events is already decoded by CosmJS
+  const events = (response.result.events || []).map(ev => ({
+    type: ev.type,
+    attributes: (ev.attributes || []).map(attr => ({
+      key: attr.key,
+      value: attr.value,
+    })),
+  }));
+
+  return {
+    hash: hex,
+    height: response.height,
+    code: response.result.code,
+    rawLog: response.result.log || '',
+    events,
+    gasUsed: String(response.result.gasUsed),
+    gasWanted: String(response.result.gasWanted),
+  };
 }
 
 export async function rpcQueryBalance(client, address, denom = 'udvpn') {

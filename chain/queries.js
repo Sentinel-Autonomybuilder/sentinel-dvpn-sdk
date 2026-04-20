@@ -32,6 +32,7 @@ import {
   rpcQueryBalance,
   rpcQueryProvider as _rpcQueryProvider,
   rpcQueryAuthzGrants as _rpcQueryAuthzGrants,
+  rpcGetTxByHash,
 } from './rpc.js';
 
 // Re-export for convenience
@@ -840,4 +841,76 @@ export function saveVpnSettings(settings) {
   const dir = path.dirname(SETTINGS_FILE);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), { mode: 0o600 });
+}
+
+// ─── TX Hash Lookup (RPC-first, LCD fallback) ───────────────────────────────
+
+/**
+ * Fetch a transaction by hash. RPC is tried first; if it fails or the TX is
+ * not found, falls back to the LCD REST endpoint.
+ *
+ * Accepts bare hex or 0x-prefixed hex for the hash.
+ * Returns the same normalised shape regardless of source:
+ *   { hash, height, code, rawLog, events, gasUsed, gasWanted }
+ *
+ * Use this to re-fetch TX events after a crash/restart or from a different
+ * process (CosmJS only returns DeliverTxResponse inline from signAndBroadcast).
+ *
+ * @param {string} txHash - Transaction hash (bare hex or 0x-prefixed)
+ * @param {object} [opts]
+ * @param {string} [opts.rpcUrl] - RPC endpoint (uses cached client if omitted)
+ * @param {string} [opts.lcdUrl] - LCD endpoint for fallback
+ * @returns {Promise<{ hash: string, height: number, code: number, rawLog: string, events: Array<{ type: string, attributes: Array<{ key: string, value: string }> }>, gasUsed: string, gasWanted: string } | null>}
+ */
+export async function getTxByHash(txHash, opts = {}) {
+  const hex = txHash.replace(/^0x/i, '').toUpperCase();
+
+  // ── RPC-first ──────────────────────────────────────────────────────────────
+  try {
+    let rpc;
+    if (opts.rpcUrl) {
+      const { createRpcQueryClient } = await import('./rpc.js');
+      rpc = await createRpcQueryClient(opts.rpcUrl);
+    } else {
+      rpc = await getRpcClient();
+    }
+    if (rpc?.tmClient) {
+      const result = await rpcGetTxByHash(rpc.tmClient, hex);
+      return result;
+    }
+  } catch (rpcErr) {
+    // "tx not found" from RPC → fall through to LCD
+    const msg = rpcErr?.message || '';
+    if (!msg.toLowerCase().includes('not found') && !msg.toLowerCase().includes('404')) {
+      // Real connectivity error — still fall through, LCD may succeed
+    }
+  }
+
+  // ── LCD fallback ───────────────────────────────────────────────────────────
+  try {
+    const doLcd = async (baseUrl) => {
+      const data = await lcdQuery(`/cosmos/tx/v1beta1/txs/${hex}`, { lcdUrl: baseUrl });
+      const txResp = data?.tx_response;
+      if (!txResp) return null;
+      const events = (txResp.events || []).map(ev => ({
+        type: ev.type,
+        attributes: (ev.attributes || []).map(attr => ({
+          key: attr.key,
+          value: attr.value,
+        })),
+      }));
+      return {
+        hash: (txResp.txhash || hex).toUpperCase(),
+        height: parseInt(txResp.height || '0', 10),
+        code: txResp.code || 0,
+        rawLog: txResp.raw_log || '',
+        events,
+        gasUsed: String(txResp.gas_used || '0'),
+        gasWanted: String(txResp.gas_wanted || '0'),
+      };
+    };
+    if (opts.lcdUrl) return await doLcd(opts.lcdUrl);
+    const { result } = await tryWithFallback(LCD_ENDPOINTS, doLcd, `getTxByHash ${hex}`);
+    return result;
+  } catch { return null; }
 }

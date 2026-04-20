@@ -311,6 +311,7 @@ export {
   rpcQueryFeeGrantsIssued,
   rpcQueryAuthzGrants,
   rpcQueryProvider,
+  rpcGetTxByHash,
 } from './chain/rpc.js';
 
 // ─── Subscription Sharing (plan operator → user onboarding) ────────────────
@@ -323,6 +324,7 @@ export {
 
 export {
   querySubscriptionAllocations,
+  getTxByHash,
 } from './chain/queries.js';
 
 // ─── TypeScript Client (extends CosmJS SigningStargateClient) ───────────────

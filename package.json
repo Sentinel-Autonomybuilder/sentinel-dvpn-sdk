@@ -6,8 +6,7 @@
   "main": "index.js",
   "types": "types/index.d.ts",
   "bin": {
-    "sentinel": "./cli/index.js",
-    "sentinel-ai": "./ai-path/cli.js"
+    "sentinel": "./cli/index.js"
   },
   "exports": {
     ".": {
@@ -16,7 +15,6 @@
     },
     "./consumer": "./consumer.js",
     "./operator": "./operator.js",
-    "./ai-path": "./ai-path/index.js",
     "./blue": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -49,7 +47,6 @@
     "errors/",
     "examples/",
     "docs/",
-    "ai-path/",
     "bin/setup.js",
     "dist/",
     "src/",
